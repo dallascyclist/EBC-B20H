@@ -269,6 +269,46 @@ class RulingTests(unittest.TestCase):
         self.assertTrue((other.parent / ("test-%d.csv" % tid)).is_file())
         self.assertIn("0 rows", out)
 
+    # R24: --config, --db and --port before or after the subcommand; after wins
+
+    def test_db_after_subcommand_works(self):
+        other = self.root / "elsewhere" / "o.db"
+        code, _, _ = self.main("pack", "add", "only-here", "--chemistry", "other", "--db", str(other))
+        self.assertEqual(code, 0)
+        self.assertTrue(other.is_file())
+        self.assertFalse(self.db.exists())
+        code, out, _ = self.main("pack", "list", "--db", str(other))
+        self.assertEqual(code, 0)
+        self.assertIn("only-here", out)
+
+    def test_config_before_and_after_subcommand(self):
+        code, _, _ = self.main("--config", str(self.cfg), "pack", "list", config=False)
+        self.assertEqual(code, 0)
+        code, _, _ = self.main("pack", "list", "--config", str(self.cfg), config=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(list(self.logs.glob("*.log"))), 2)
+
+    def test_port_after_subcommand_parses(self):
+        args = R.parse_args(["discharge", "--pack", "p", "--current", "1", "--cutoff", "50", "--port", "/dev/fake"])
+        self.assertEqual(args.port, "/dev/fake")
+
+    def test_value_after_subcommand_wins(self):
+        args = R.parse_args(["--db", "before.db", "pack", "list", "--db", "after.db"])
+        self.assertEqual(args.db, "after.db")
+        args = R.parse_args(["--db", "a.db", "pack", "--db", "b.db", "list", "--db", "c.db"])
+        self.assertEqual(args.db, "c.db")
+        args = R.parse_args(["--db", "before.db", "--port", "/dev/x", "tests"])
+        self.assertEqual((args.db, args.port), ("before.db", "/dev/x"))
+
+    def test_globals_default_to_none_when_absent(self):
+        args = R.parse_args(["pack", "list"])
+        self.assertEqual((args.config, args.db, args.port), (None, None, None))
+
+    def test_version_is_top_level_only(self):
+        code, out, _ = self.main("pack", "list", "--version")
+        self.assertEqual(code, 3)
+        self.assertTrue(out.startswith("error: unrecognized arguments"), out)
+
     def test_export_csv_creates_parent_directory(self):
         tid = self.seed_test(samples=3)
         path = self.root / "out" / "nested" / "x.csv"

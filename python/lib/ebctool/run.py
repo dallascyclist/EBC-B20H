@@ -59,30 +59,43 @@ class _Parser(argparse.ArgumentParser):
         raise ConfigError(message)
 
 
+def _add_globals(parser: argparse.ArgumentParser, default) -> None:
+    parser.add_argument("--config", metavar="PATH", default=default,
+                        help="INI file (default: config/config.ini if it exists, else built-in defaults)")
+    parser.add_argument("--port", default=default, help="serial port; overrides [serial] port")
+    parser.add_argument("--db", metavar="PATH", default=default, help="SQLite database; overrides [run] db_path")
+
+
 def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
+    """Global options go before or after the subcommand; a value after the subcommand wins."""
     p = _Parser(prog="bin/ebc.sh", description="Drive a ZKETECH EBC-B20H battery tester and keep per-pack test history.",
                 **_NO_COLOR)
-    p.add_argument("--config", metavar="PATH",
-                   help="INI file (default: config/config.ini if it exists, else built-in defaults)")
-    p.add_argument("--port", help="serial port; overrides [serial] port")
-    p.add_argument("--db", metavar="PATH", help="SQLite database; overrides [run] db_path")
+    _add_globals(p, None)
     p.add_argument("--version", action="store_true", help="print the version and exit")
+    # Each subparser repeats the globals with SUPPRESS defaults, so it sets them only when they are
+    # given after the subcommand; argparse copies its values over the top level's afterwards.
+    common = argparse.ArgumentParser(add_help=False)
+    _add_globals(common, argparse.SUPPRESS)
+
+    def add(subparsers, name, summary):
+        return subparsers.add_parser(name, help=summary, parents=[common])
+
     sub = p.add_subparsers(dest="command")
 
-    s = sub.add_parser("ports", help="list serial ports and the one 'auto' picks")
+    s = add(sub, "ports", "list serial ports and the one 'auto' picks")
     s.set_defaults(func=cmd_ports)
 
-    s = sub.add_parser("discover", help="connect and print every status frame for a while")
+    s = add(sub, "discover", "connect and print every status frame for a while")
     s.add_argument("--seconds", type=float, default=30.0, help="how long to listen (default 30)")
     s.add_argument("--raw", action="store_true", help="also print each frame in hex")
     s.set_defaults(func=cmd_discover)
 
-    s = sub.add_parser("monitor", help="print decoded status frames until Ctrl-C")
+    s = add(sub, "monitor", "print decoded status frames until Ctrl-C")
     s.set_defaults(func=cmd_monitor)
 
-    pack = sub.add_parser("pack", help="add, list or show packs")
+    pack = add(sub, "pack", "add, list or show packs")
     pack_sub = pack.add_subparsers(dest="pack_command", metavar="{add,list,show}", required=True)
-    s = pack_sub.add_parser("add", help="register a pack")
+    s = add(pack_sub, "add", "register a pack")
     s.add_argument("name")
     s.add_argument("--chemistry", required=True, choices=CHEMISTRIES)
     s.add_argument("--cells", type=int, help="cells in series")
@@ -90,13 +103,13 @@ def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     s.add_argument("--nominal-v", type=float, help="nominal voltage")
     s.add_argument("--notes", default="")
     s.set_defaults(func=cmd_pack_add)
-    s = pack_sub.add_parser("list", help="list packs")
+    s = add(pack_sub, "list", "list packs")
     s.set_defaults(func=cmd_pack_list)
-    s = pack_sub.add_parser("show", help="show one pack and its tests")
+    s = add(pack_sub, "show", "show one pack and its tests")
     s.add_argument("name")
     s.set_defaults(func=cmd_pack_show)
 
-    s = sub.add_parser("discharge", help="run a constant-current discharge test on a pack")
+    s = add(sub, "discharge", "run a constant-current discharge test on a pack")
     s.add_argument("--pack", required=True, metavar="NAME")
     s.add_argument("--current", type=float, required=True, metavar="A")
     s.add_argument("--cutoff", type=float, required=True, metavar="V")
@@ -105,16 +118,16 @@ def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     s.add_argument("--yes", action="store_true", help="start without asking for confirmation")
     s.set_defaults(func=cmd_discharge)
 
-    s = sub.add_parser("tests", help="list tests, newest first")
+    s = add(sub, "tests", "list tests, newest first")
     s.add_argument("--pack", metavar="NAME")
     s.set_defaults(func=cmd_tests)
 
-    s = sub.add_parser("export", help="write one test's samples as CSV")
+    s = add(sub, "export", "write one test's samples as CSV")
     s.add_argument("--test", type=int, required=True, metavar="ID")
     s.add_argument("--csv", metavar="PATH", help="output file (default: test-ID.csv beside the database)")
     s.set_defaults(func=cmd_export)
 
-    s = sub.add_parser("history", help="per-pack history table, optionally as HTML")
+    s = add(sub, "history", "per-pack history table, optionally as HTML")
     s.add_argument("--pack", required=True, metavar="NAME")
     s.add_argument("--html", metavar="PATH")
     s.set_defaults(func=cmd_history)
