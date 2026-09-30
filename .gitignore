@@ -1,0 +1,17 @@
+# runtime secrets and state: nothing in config/ tracked except the example
+config/*
+!config/config.example.ini
+logs/
+db/
+venv/
+
+# python
+__pycache__/
+*.pyc
+
+# tooling and OS
+.DS_Store
+.claude/
+.remember/
+.serena/
+.superpowers/
