@@ -2,8 +2,9 @@
 
 Host -> device commands are 10 bytes: FA cmd p1 p1 p2 p2 p3 p3 xor F8.
 Device -> host status reports are 19 bytes: FA cmd f1 f1 ... f7 f7 model xor F8.
-Two-byte fields are base-240 (hi * 240 + lo). The checksum is the XOR of the bytes
-between FA and the checksum; when its high nibble is 0xF the vendor clears that nibble.
+Two-byte fields are base-240 (hi * 240 + lo); live voltage and capacity also carry
+range flags in the high byte. The checksum is the XOR of the bytes between FA and the
+checksum; when its high nibble is 0xF the vendor clears that nibble.
 """
 from __future__ import annotations
 
@@ -192,10 +193,11 @@ def extract_frames(buffer: bytes) -> tuple[list[bytes], bytes]:
     """Split a byte stream into 19-byte FA..F8 candidates; return (frames, unconsumed tail).
 
     Bytes before the first SOF are dropped. A candidate window that contains a later SOF
-    is abandoned for that SOF: FA cannot occur inside a real frame (data bytes are
-    base-240, cmd <= 0x70, the checksum's 0xF high nibble is cleared). A full window with
-    a bad trailer advances one byte. A partial candidate stays in the tail. Checksums are
-    not checked here.
+    is abandoned for that SOF: FA does not occur inside a real frame (base-240 digits are
+    <= 0xEF, range-flagged high bytes reach FA only far beyond this tester's limits,
+    cmd <= 0x70, the checksum's 0xF high nibble is cleared). A full window with a bad
+    trailer advances one byte. A partial candidate stays in the tail. Checksums are not
+    checked here.
     """
     frames, i = [], 0
     while True:
