@@ -1,4 +1,4 @@
-"""Load config/config.ini into immutable dataclasses and validate it up front.
+"""Read the ebctool INI file into frozen dataclasses, checking every value as it loads.
 
 Every section and key is optional; anything absent (or left blank) takes the default
 below. Relative paths resolve from the current working directory; bin/ebc.sh always
@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 class ConfigError(Exception):
-    """Configuration missing or invalid. The CLI maps this to exit code 3."""
+    """The config file is absent, unreadable, or holds a bad value; the CLI exits with code 3."""
 
 
 PARITIES = ("E", "O")
