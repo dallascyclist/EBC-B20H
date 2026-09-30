@@ -38,6 +38,12 @@ def make_log(tmpdir):
     return log
 
 
+def make_store(tmpdir):
+    from ebctool.store import Store
+    store = Store(Path(tmpdir) / "db" / "t.db")
+    return store
+
+
 def hexframe(text):
     """'fa 05 00 ... f8' -> bytes."""
     return bytes.fromhex(text.replace(" ", ""))
