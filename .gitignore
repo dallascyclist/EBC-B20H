@@ -15,3 +15,6 @@ __pycache__/
 .remember/
 .serena/
 .superpowers/
+
+# vendor documentation kept locally (copyright ZKETECH; not redistributed)
+Vendor Docs/
