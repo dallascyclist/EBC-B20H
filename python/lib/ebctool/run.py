@@ -7,6 +7,7 @@ stderr carries only the run log's WARNING-and-above mirror.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 import time
 from contextlib import closing
@@ -149,7 +150,11 @@ def _load(args: argparse.Namespace) -> tuple[Config, str]:
 
 
 def _open_store(config: Config, store_factory: Callable):
-    return store_factory(config.run.db_path)
+    path = config.run.db_path
+    try:
+        return store_factory(path)
+    except (OSError, sqlite3.Error) as exc:
+        raise StoreError("cannot open database %s: %s" % (path, exc)) from exc
 
 
 def _error(stdout, message) -> int:

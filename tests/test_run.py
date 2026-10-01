@@ -145,6 +145,14 @@ class RulingTests(unittest.TestCase):
         self.assertIn("disk on fire", out.getvalue())
         self.assertIn("Traceback", self.log_text())
 
+    def test_unopenable_database_exits_3(self):
+        afile = self.root / "afile"
+        afile.write_text("not a directory")
+        code, out, err = self.main("--db", str(afile / "x.db"), "pack", "list")
+        self.assertEqual(code, 3)
+        self.assertTrue(out.startswith("error: cannot open database"), out)
+        self.assertEqual(err, "")
+
     def test_keyboard_interrupt_exits_2(self):
         def interrupted_store(path):
             raise KeyboardInterrupt
