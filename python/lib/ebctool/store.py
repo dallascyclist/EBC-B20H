@@ -16,7 +16,7 @@ from typing import Optional
 from ebctool.log import traced
 
 CHEMISTRIES = ("li-ion", "lifepo4", "other")
-END_REASONS = ("cutoff", "max_time", "user_stop", "comm_lost", "device_error")
+END_REASONS = ("cutoff", "max_time", "pack_lost", "user_stop", "comm_lost", "device_error")
 CSV_HEADER = ("t_s", "volts", "amps", "ah_host", "wh_host", "ah_device", "state")
 
 SCHEMA = """

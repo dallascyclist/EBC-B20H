@@ -35,7 +35,7 @@ from ebctool.store import CHEMISTRIES, Pack, Store, StoreError, TestRow
 
 EXIT_OK, EXIT_ABORTED, EXIT_USER_STOP, EXIT_CONFIG = 0, 1, 2, 3
 EXIT_BY_END_REASON = {"cutoff": EXIT_OK, "max_time": EXIT_OK, "user_stop": EXIT_USER_STOP,
-                      "comm_lost": EXIT_ABORTED, "device_error": EXIT_ABORTED}
+                      "comm_lost": EXIT_ABORTED, "device_error": EXIT_ABORTED, "pack_lost": EXIT_ABORTED}
 NO_ANSWER = "no answer from tester: leave the settings screen, stop any panel-started test, and check the port"
 MAX_MINUTES = 999
 LOW_CUTOFF_V_PER_CELL = 2.5

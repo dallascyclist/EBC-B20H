@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from ebctool.session import DischargePlan, Sample, SessionResult
 from ebctool.store import SampleRow, Store
 from tests.fakes import ClosingPipe, FakeClock, FakeDevice, make_device_factory
 from tests.support import close_log, hexframe, make_log, use_tz
+from tests.test_session import COLLAPSED_0V, bench_unplug_script
 
 EBC_PY = Path(__file__).resolve().parent.parent / "python" / "scripts" / "ebc.py"
 
@@ -927,6 +929,49 @@ class DeviceCommandRulingTests(unittest.TestCase):
         self.assertIn("comm_lost", out)
         self.assertIn("panel", out)   # tells the user to check the tester itself
 
+    def test_bench_unplug_exits_1_as_pack_lost_and_stays_out_of_chart_b(self):
+        """R39, the 2026-09-30 bench finding: a pack unplugged 26 s into a 1.00 A run, cutoff 50.00 V,
+        was stored as cutoff and exited 0. A normal cutoff run first, so chart B has a point."""
+        use_tz(self, "America/Chicago")
+        self.add_pack()
+        code, _, _ = self.discharge([(0.5, IDLE_HEX), (6.5, ACTIVE_HEX), (8.5, ACTIVE_HEX), (10.5, FIN_CUTOFF_HEX)],
+                                    "--current", "1", "--cutoff", "50", "--yes")
+        self.assertEqual(code, 0)
+        factory = make_device_factory(bench_unplug_script())
+        out = io.StringIO()
+        code = R.main(["--config", str(self.cfg), "discharge", "--pack", "p", "--current", "1", "--cutoff", "50",
+                       "--max-minutes", "10", "--yes"], stdout=out, stdin=io.StringIO(""),
+                      device_factory=factory, clock=factory.clock)
+        out, dev = out.getvalue(), factory.last
+        self.assertEqual(code, 1)
+        self.assertEqual(dev.sent, [P.connect(), P.start_cc(1.0, 50.0, 10), P.stop(), P.disconnect()])
+        self.assertTrue(dev.closed)
+        self.assertIn("\nend reason  pack_lost\n", out)
+        self.assertIn("voltage     54.10 V at start, 0.00 V at end\n" + COLLAPSED_0V + "\nsaved as test 2\n", out)
+        (lost, lost_samples), (cutoff, _) = self.rows()   # newest first
+        self.assertEqual((lost.id, lost.end_reason, lost.end_v, cutoff.end_reason), (2, "pack_lost", 0.0, "cutoff"))
+        self.assertIsNotNone(lost.ended_at)
+        self.assertEqual(lost_samples[-1].volts, 40.69)
+        log = (self.logs / (lost.run_id + ".log")).read_text(encoding="utf-8")
+        self.assertIn("DECISION " + COLLAPSED_0V + "\n", log)
+        self.assertIn("exit 1", log)
+
+        code, out = self._plain("history", "--pack", "p")
+        self.assertEqual(code, 0, out)
+        header, first, second = out.splitlines()
+        self.assertEqual((first.split()[0], first.split()[-1]), ("1", "cutoff"))
+        self.assertEqual((second.split()[0], second.split()[-1]), ("2", "pack_lost"))
+        path = Path(self.tmp.name) / "out" / "p.html"
+        code, out = self._plain("history", "--pack", "p", "--html", str(path))
+        self.assertEqual(code, 0, out)
+        html = path.read_text(encoding="utf-8")
+        chart_a, chart_b = re.findall(r"<svg\b.*?</svg>", html, re.S)
+        self.assertEqual(chart_a.count("<polyline"), 2)          # both curves, the pack_lost one included
+        self.assertEqual(chart_b.count('class="dot"'), 1)        # only the cutoff test
+        self.assertIn("test 1:", chart_b); self.assertNotIn("test 2:", chart_b)
+        self.assertIn('</svg>\n<p class="chart-note">pack_lost tests are not plotted here</p>', html)
+        self.assertIn('<td class="lost">pack_lost: not a capacity result</td>', html)
+
     def test_signal_handler_untouched_when_not_started(self):
         self.add_pack()
         before = signal.getsignal(signal.SIGINT)
@@ -953,6 +998,25 @@ class ConsoleSinkTests(unittest.TestCase):
             self.assertIn(want, text)
         self.assertNotIn("01:02:03", text)
         self.assertNotIn("\x1b", text)
+
+    def test_pack_lost_summary_adds_the_collapse_line(self):
+        out = io.StringIO()
+        ConsoleSink(out, FakeClock()).on_end(
+            SessionResult("pack_lost", 26.2, 0.0066, 0.35, 0.007, 54.10, 0.00, "EBC-B20H", None, 31, 0,
+                          collapsed_v=0.00))
+        lines = out.getvalue()[1:].splitlines()
+        self.assertEqual(len(lines), 7, lines)
+        self.assertEqual(lines[0], "end reason  pack_lost")
+        self.assertEqual(lines[-1], COLLAPSED_0V)
+
+    def test_collapse_line_names_the_judged_voltage(self):
+        out = io.StringIO()
+        ConsoleSink(out, FakeClock()).on_end(
+            SessionResult("pack_lost", 600.0, 1.0, 50.0, 1.0, 54.10, 46.50, "EBC-B20H", None, 300, 0,
+                          collapsed_v=44.99))
+        self.assertEqual(out.getvalue().splitlines()[-1],
+                         "pack voltage collapsed to 44.99 V: pack disconnected or its BMS cut off;"
+                         " this test is not a capacity result")
 
     # R38: the first OSError ends console output for the session, without raising
 

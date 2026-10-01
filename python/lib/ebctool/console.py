@@ -11,7 +11,7 @@ from typing import Optional
 
 from ebctool.log import current
 from ebctool.protocol import MODE_NAMES, Status
-from ebctool.session import DischargePlan, Sample, SessionResult
+from ebctool.session import DischargePlan, Sample, SessionResult, pack_lost_text
 from ebctool.store import SampleRow, Store
 
 LIVE_WIDTH = 80
@@ -106,6 +106,8 @@ class ConsoleSink:
                  "Ah device   %s" % ("-" if result.ah_device_final is None else "%.3f" % result.ah_device_final),
                  "Wh host     %.2f" % result.wh_host,
                  "voltage     %.2f V at start, %.2f V at end" % (result.start_v, result.end_v))
+        if result.collapsed_v is not None:
+            lines += (pack_lost_text(result.collapsed_v),)
         self._write("\n" + "".join(line + "\n" for line in lines))
 
 

@@ -361,6 +361,125 @@ class SessionExitPathTests(unittest.TestCase):
         self.assertEqual((r.device_model, r.firmware), ("EBC-B20H", None))
 
 
+# --- R39: pack_lost ------------------------------------------------------------------
+# An unplugged pack and an e-bike BMS low-voltage cut-off look the same on the wire: the voltage
+# collapses. Judged before the cutoff rule when the tester ends the run: pack_lost if the ending
+# frame reads below 1.00 V, or if the lower of the ending frame and the last sampled active frame
+# is more than max(2.00 V, 10% of the cutoff) below the cutoff. While running, an active frame
+# below 1.00 V ends the run at once as pack_lost.
+
+BENCH_PLAN = DischargePlan(current_a=1.0, cutoff_v=50.0, max_minutes=10)
+COLLAPSED_0V = ("pack voltage collapsed to 0.00 V: pack disconnected or its BMS cut off;"
+                " this test is not a capacity result")
+
+
+def bench_unplug_script():
+    """Replay of the 2026-09-30 22:06 CDT bench test: a 54.10 V pack at 1.00 A, cutoff 50.00 V,
+    unplugged 26 s in. The first running frame still reads 0.00 A, then about 53.8 V at 1.00 A;
+    then one running frame at 40.69 V and 0.00 A, and the finished frame at 0.00 V. The raw bytes
+    were not logged, so the frames are rebuilt from the decoded values."""
+    s = [(0.5, frame("00", amps_hex="00 00", volts_hex=volts_hex(54.10))),
+         (6.5, frame("0a", amps_hex="00 00", volts_hex=volts_hex(54.11)))]
+    s += [(8.5 + 2 * k, frame("0a", volts_hex=volts_hex(53.86 - 0.01 * k))) for k in range(12)]
+    return s + [(32.5, frame("0a", amps_hex="00 00", volts_hex=volts_hex(40.69))),
+                (33.0, frame("14", amps_hex="00 00", volts_hex=volts_hex(0.00)))]
+
+
+class PackLostTests(unittest.TestCase):
+    make = SessionExitPathTests.make
+
+    def end(self, sampled_v, ending_cmd, ending_v, plan=PLAN):
+        """Run to a last sampled active frame at sampled_v, then an ending frame (finished 14 or
+        idle 00) at ending_v; returns the result and the device."""
+        script = [(0.5, IDLE), (6.5, ACTIVE), (8.5, frame("0a", volts_hex=volts_hex(sampled_v))),
+                  (10.5, frame(ending_cmd, volts_hex=volts_hex(ending_v)))]
+        sess, dev, sinks, _ = self.make(script, plan=plan)
+        r = sess.run()
+        self.assertEqual(dev.sent[-2:], [P.stop(), P.disconnect()])
+        self.assertEqual(sinks[0].ends, 1)
+        return r
+
+    def test_bench_unplug_replay_is_pack_lost(self):
+        script = bench_unplug_script()
+        self.assertEqual([st.volts for _, st in script[-2:]], [40.69, 0.00])
+        sess, dev, sinks, _ = self.make(script, plan=BENCH_PLAN)
+        r = sess.run()
+        self.assertEqual(r.end_reason, "pack_lost")
+        self.assertEqual(r.end_v, 0.00)
+        self.assertEqual(r.collapsed_v, 0.00)
+        self.assertEqual(sinks[0].samples[-1].volts, 40.69)   # the 40.69 V running frame is still a sample
+        self.assertEqual(dev.sent, [P.connect(), P.start_cc(1.0, 50.0, 10), P.stop(), P.disconnect()])
+        self.assertEqual((sinks[0].ends, sinks[0].ended), (1, r))
+
+    def test_active_frame_below_1v_ends_the_run_at_once_as_pack_lost(self):
+        dead = frame("0a", amps_hex="00 00", volts_hex=volts_hex(0.00))
+        script = [(0.5, IDLE), (6.5, ACTIVE), (8.5, frame("0a")), (10.5, dead)]   # then silence: no finished frame
+        sess, dev, sinks, clock = self.make(script)
+        r = sess.run()
+        self.assertEqual(r.end_reason, "pack_lost")
+        self.assertEqual(clock.now(), 10.5)            # ended on that frame, not silence_timeout_s later
+        self.assertEqual((r.runtime_s, r.end_v, r.collapsed_v), (4.0, 0.00, 0.00))
+        self.assertEqual(dev.sent, [P.connect(), P.start_cc(1.0, 50.0, 3), P.stop(), P.disconnect()])
+        self.assertEqual(dev.sent.count(P.disconnect()), 1)
+        self.assertEqual(sinks[0].ends, 1)
+
+    def test_running_check_is_strictly_below_1_00_v(self):
+        for volts, want in ((0.99, "pack_lost"), (1.00, "comm_lost")):   # 1.00 V runs on until the silence
+            with self.subTest(volts=volts):
+                low = frame("0a", amps_hex="00 00", volts_hex=volts_hex(volts))
+                sess, dev, _, _ = self.make([(0.5, IDLE), (6.5, ACTIVE), (8.5, low)])
+                self.assertEqual(sess.run().end_reason, want)
+                self.assertEqual(dev.sent[-2:], [P.stop(), P.disconnect()])
+
+    def test_first_active_frame_below_1v_is_pack_lost(self):
+        dead = frame("0a", amps_hex="00 00", volts_hex=volts_hex(0.00))
+        sess, dev, _, clock = self.make([(0.5, IDLE), (6.5, dead)])
+        r = sess.run()
+        self.assertEqual(r.end_reason, "pack_lost")
+        self.assertEqual(clock.now(), 6.5)
+        self.assertEqual(dev.sent, [P.connect(), P.start_cc(1.0, 50.0, 3), P.stop(), P.disconnect()])
+
+    def test_ending_frame_below_1v_is_pack_lost_on_finished_or_idle(self):
+        for cmd in ("14", "00"):
+            with self.subTest(ending=cmd):
+                r = self.end(53.80, cmd, 0.00)
+                self.assertEqual((r.end_reason, r.end_v, r.collapsed_v), ("pack_lost", 0.00, 0.00))
+
+    def test_genuine_cutoff_at_50_02_v_is_still_cutoff(self):
+        # R30 regression guard: sag to 50.02 V, finished at 50.02 V, cutoff 50.00 V + 0.05 V margin
+        r = self.end(50.02, "14", 50.02)
+        self.assertEqual((r.end_reason, r.collapsed_v), ("cutoff", None))
+
+    def test_47_99_v_is_cutoff_because_10_percent_of_50_v_makes_the_threshold_5_00_v(self):
+        # 2.01 V below the 50.00 V cutoff: more than 2.00 V, but the threshold is
+        # max(2.00 V, 10% x 50.00 V = 5.00 V) = 5.00 V, and 2.01 V is not more than that
+        for cmd in ("14", "00"):
+            with self.subTest(ending=cmd):
+                self.assertEqual(self.end(47.99, cmd, 47.99).end_reason, "cutoff")
+
+    def test_45_00_v_exactly_5_00_v_below_a_50_v_cutoff_is_still_cutoff(self):
+        # 5.00 V below is not more than the 5.00 V threshold
+        self.assertEqual(self.end(45.00, "14", 45.00).end_reason, "cutoff")
+
+    def test_44_99_v_more_than_5_00_v_below_a_50_v_cutoff_is_pack_lost(self):
+        # 5.01 V below the 50.00 V cutoff: more than max(2.00 V, 5.00 V) = 5.00 V
+        for cmd in ("14", "00"):
+            with self.subTest(ending=cmd):
+                r = self.end(44.99, cmd, 44.99)
+                self.assertEqual((r.end_reason, r.collapsed_v), ("pack_lost", 44.99))
+
+    def test_drop_is_judged_on_the_lower_of_ending_and_last_sampled_voltage(self):
+        # last sampled 44.99 V (5.01 V below 50.00 V), ending frame rebounded to 46.50 V (3.50 V below)
+        r = self.end(44.99, "14", 46.50)
+        self.assertEqual((r.end_reason, r.end_v, r.collapsed_v), ("pack_lost", 46.50, 44.99))
+
+    def test_2_00_v_floor_governs_when_10_percent_of_the_cutoff_is_less(self):
+        # cutoff 15.00 V: 10% is 1.50 V, so the threshold is max(2.00 V, 1.50 V) = 2.00 V
+        plan = DischargePlan(1.0, 15.0, 0)
+        self.assertEqual(self.end(13.00, "14", 13.00, plan=plan).end_reason, "cutoff")      # 2.00 V below
+        self.assertEqual(self.end(12.99, "14", 12.99, plan=plan).end_reason, "pack_lost")   # 2.01 V below
+
+
 class SessionLogTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -407,6 +526,22 @@ class SessionLogTests(unittest.TestCase):
         script = [(0.5, IDLE), (6.5, ACTIVE), (8.5, frame("0a")), (8.5, frame("0a")), (10.5, FINISHED)]
         DischargeSession(FakeDevice(script, clock), PLAN, [], clock).run()
         self.assertTrue([l for l in self.lines() if " DEBUG " in l and "skip" in l.lower()])
+
+    def test_pack_lost_decisions_name_the_judgement_and_the_collapse(self):
+        clock = FakeClock()
+        DischargeSession(FakeDevice(bench_unplug_script(), clock), BENCH_PLAN, [], clock).run()
+        decisions = [l for l in self.lines() if " DECISION " in l]
+        self.assertTrue([l for l in decisions if "finished at 0.00 V" in l and l.endswith("(judged on 0.00 V); pack_lost")],
+                        decisions)
+        self.assertEqual(len([l for l in decisions if l.endswith("DECISION " + COLLAPSED_0V)]), 1, decisions)
+
+    def test_running_pack_lost_is_a_decision_line(self):
+        clock = FakeClock()
+        dead = frame("0a", amps_hex="00 00", volts_hex=volts_hex(0.00))
+        DischargeSession(FakeDevice([(0.5, IDLE), (6.5, ACTIVE), (8.5, dead)], clock), PLAN, [], clock).run()
+        decisions = [l for l in self.lines() if " DECISION " in l]
+        self.assertTrue([l for l in decisions if "active frame at 0.00 V, below 1.00 V; pack_lost" in l], decisions)
+        self.assertEqual(len([l for l in decisions if l.endswith("DECISION " + COLLAPSED_0V)]), 1, decisions)
 
 
 

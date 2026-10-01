@@ -135,7 +135,7 @@ The limits default to the B20H's published ranges: current up to 20.00 A with a 
 | Exit | Meaning |
 |---|---|
 | 0 | The device ended the test (cutoff or max time) |
-| 1 | Aborted after Start (communication lost, device error, unexpected failure); partial data saved |
+| 1 | Aborted after Start (communication lost, device error, pack lost (`pack_lost`), unexpected failure); partial data saved |
 | 2 | Stopped by the user (Ctrl-C or declining the prompt); partial data saved if the test had started |
 | 3 | Nothing started: configuration, argument, database, serial-port, range or preflight failure |
 
@@ -180,11 +180,17 @@ records each decision as a `DECISION` line.
    point. Host Ah and Wh are trapezoid integrals of current and of voltage times current over the
    host clock; the tester's own Ah count is stored beside them for comparison. A live line shows
    elapsed time, voltage, current, Ah and Wh. Once a minute ebctool sends a timer sync, as the
-   vendor's software does.
+   vendor's software does. A running frame below 1.00 V means the pack is no longer on the leads:
+   ebctool ends the test at once as `pack_lost` (exit 1) without waiting for the tester.
 7. **End.** The tester ends the discharge itself, at the cutoff or at the time limit. ebctool sees
    either the tester's single "finished" frame or the switch from running back to idle, and names
-   the end reason: `cutoff` if the last voltage is at most 0.05 V above the cutoff, `max_time` if a
-   time limit was set and the run lasted at least that long less 5 s, otherwise `device_error`.
+   the end reason from the lower of that frame's voltage and the last running voltage:
+   `pack_lost` (exit 1) if the ending frame reads below 1.00 V, or if that voltage is more than
+   2.00 V or 10% of the cutoff (whichever is larger) below the cutoff; then `cutoff` if it is at
+   most 0.05 V above the cutoff, `max_time` if a time limit was set and the run lasted at least
+   that long less 5 s, otherwise `device_error`. An unplugged pack and an e-bike pack whose BMS
+   cut off on low voltage look the same to the tester: the voltage collapses and the tester ends
+   the run as if at the cutoff. `pack_lost` keeps that from being recorded as a capacity result.
    There is no host-side time backstop: the tester enforces `--max-minutes`; ebctool records it
    but does not stop the run itself.
 8. **Ctrl-C and lost contact.** Ctrl-C during the run ends the test as `user_stop` (exit 2). If no
@@ -194,7 +200,9 @@ records each decision as a `DECISION` line.
    `device_error` (exit 1) with the traceback in the run log. The samples so far are kept in every
    case.
 9. **Always.** However the run ends, ebctool sends Stop then Disconnect and prints a summary: end
-   reason, runtime, host Ah, tester Ah, host Wh, start and end voltage. Then it prints
+   reason, runtime, host Ah, tester Ah, host Wh, start and end voltage, and for `pack_lost` the line
+   `pack voltage collapsed to X V: pack disconnected or its BMS cut off; this test is not a capacity
+   result`, which also goes to the run log as a `DECISION` line. Then it prints
    `saved as test N`, or after an unexpected error the error and the path of the run log.
 
 ## History and reports
@@ -211,7 +219,10 @@ records each decision as a `DECISION` line.
   end reason. With `--html PATH` it also writes one self-contained HTML file: voltage under load
   against elapsed minutes with every test overlaid (the newest eight in colour and labelled by
   date, older ones in gray), delivered Ah by date, and the same table. The page has no script and
-  loads nothing external; it follows the browser's light or dark setting.
+  loads nothing external; it follows the browser's light or dark setting. A `pack_lost` test is
+  listed like any other and its curve is drawn, but the HTML table marks its end column
+  `pack_lost: not a capacity result` and the delivered-Ah chart leaves it out, with the note
+  `pack_lost tests are not plotted here`, so a BMS trip does not look like capacity fade.
 
 Start times are stored in UTC. The `tests`, `pack show` and `history` tables and the HTML table
 show each one twice, in columns `started UTC` (`2026-10-01 02:42Z`) and `started local`
@@ -236,6 +247,7 @@ pack. Tests that never finished are left out of the history.
 | `error: pack reads ... V, cutoff ... V needs at least 0.5 V headroom` | The pack is already close to or below the cutoff | Charge the pack, or choose a lower cutoff |
 | `error: --current ... is outside ...` (or `--cutoff`, `--max-minutes`) | The value is outside the `[limits]` range or 0 to 999 minutes | Choose a value inside the range |
 | `lost contact with the tester: check its display and stop it from the panel if it is still running` | No valid frame for `silence_timeout_s` during the run | Look at the tester. The samples so far are saved; `grep DECISION` the run log for the sequence |
+| `pack voltage collapsed to ... V: pack disconnected or its BMS cut off; this test is not a capacity result` (end reason `pack_lost`, exit 1) | The pack voltage fell below 1.00 V, or far below the cutoff: a lead came off, or the pack's BMS cut the output (an e-bike BMS does this on low voltage, on a weak cell group, or on a current it will not supply) | Check the leads and the pack's own switch or fuse. If the BMS tripped above the cutoff, raise the cutoff or lower the current and test again. The test stays in the history but out of the delivered-Ah chart |
 | `ebctool requires Python 3.12 or newer; found ...` | The launcher found an older `python3` | Create `venv` from a Python 3.12 or newer (see Setup) |
 
 ## Where things go

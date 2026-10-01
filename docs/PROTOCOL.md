@@ -187,6 +187,28 @@ Confirmed on the B20H.
   rebounded from 54.10 to 54.34 V. ebctool ends a run on either `14` or a switch from running to
   idle, so one lost frame cannot leave it waiting.
 
+### Pack removed during a discharge
+
+Bench test, 2026-09-30 22:06 CDT (03:06Z): a 52 V pack at 54.10 V idle, PC CC 1.00 A, cutoff
+50.00 V, 10 minute limit; the pack was unplugged from the tester about 26 s after the first
+running frame. The raw bytes were not logged (`log_frames` was off); the sequence below is the
+decoded samples and the run log's `DECISION` lines.
+
+| Host time after first running frame | Frame | Voltage | Current |
+|---|---|---|---|
+| 0.0 s | running `0a` | 54.11 V | 0.00 A (current starts one frame late) |
+| 1.8 to 23.8 s, about every 2 s | running `0a` | 53.86 V falling to 53.77 V | 1.00 A |
+| 25.8 s | running `0a` | 40.69 V | 0.00 A |
+| 26.2 s | finished `14` | 0.00 V | not recorded |
+
+There was one transitional running frame, then the tester ended the run itself with its usual
+single finished frame, exactly as at a real cutoff: from the frames alone the two differ only in
+the voltage. An e-bike pack whose BMS cuts its output on low voltage is expected to look the same
+on the wire. ebctool therefore judges `pack_lost` before `cutoff`: an ending frame below 1.00 V,
+or the lower of the ending and last running voltage more than max(2.00 V, 10% of the cutoff)
+below the cutoff; and a running frame below 1.00 V ends the run at once. Before this rule the
+test above was recorded as `cutoff` and exited 0.
+
 ## macOS: keep the tester on a direct port
 
 On 2026-09-30, with the cable four hubs deep in a dock chain, configuring the port (`tcsetattr`)

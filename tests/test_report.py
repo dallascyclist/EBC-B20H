@@ -16,12 +16,12 @@ TITLE_RE = re.compile(r"<title>(.*?)</title>", re.S)
 TAG_RE = re.compile(r"<[^>]+>")
 
 
-def add_finished(store, pack_id, day, ah, samples=3, ah_device=None, run="r"):
+def add_finished(store, pack_id, day, ah, samples=3, ah_device=None, run="r", reason="cutoff"):
     """One finished test started on 2026-09-<day> with a short falling voltage curve."""
     tid = store.begin_test(pack_id, "2026-09-%sT10:00:00Z" % day, 5.0, 42.0, 0, run)
     for k in range(samples):
         store.append_sample(tid, SampleRow(tid, 2.0 * k, 54.0 - k, 5.0, ah * k / 2, 50.0 * k, ah * k / 2, "active"))
-    store.finish_test(tid, "2026-09-%sT12:00:00Z" % day, "cutoff", 7200, ah, 400.0,
+    store.finish_test(tid, "2026-09-%sT12:00:00Z" % day, reason, 7200, ah, 400.0,
                       ah if ah_device is None else ah_device, 54.0, 42.1, "EBC-B20H", "3.08")
     return tid
 
@@ -209,6 +209,72 @@ class ReportTests(unittest.TestCase):
         self.assertIn("&lt;i&gt;spare&lt;/i&gt;", html)
         self.assertNotIn("<b>", html)
         self.assertNotIn("<i>", html)
+
+    # R39: a pack_lost test (pack unplugged, or its BMS cut off) is listed and marked, but it is
+    # not a capacity result, so chart B leaves it out
+
+    def lost_pack(self):
+        """Pack 'lost' (rated 10 Ah): cutoff on the 1st, pack_lost on the 10th, cutoff on the 20th."""
+        p = self.store.add_pack("lost", "li-ion", rated_ah=10.0)
+        return [add_finished(self.store, p.id, "01", 9.0),
+                add_finished(self.store, p.id, "10", 0.5, reason="pack_lost"),
+                add_finished(self.store, p.id, "20", 8.8)]
+
+    def test_pack_lost_tests_are_history_rows_with_percent_of_rated(self):
+        self.lost_pack()
+        rows = history_rows(self.store, "lost")
+        self.assertEqual([r.end_reason for r in rows], ["cutoff", "pack_lost", "cutoff"])
+        self.assertAlmostEqual(rows[1].pct_of_rated, 5.0)
+        header, *lines = format_table(rows).splitlines()
+        self.assertEqual([line.split()[-1] for line in lines], ["cutoff", "pack_lost", "cutoff"])
+
+    def test_chart_b_leaves_out_pack_lost_tests_and_says_so_below_it(self):
+        first, lost, last = self.lost_pack()
+        html = self.html("lost")
+        chart_a, chart_b = SVG_RE.findall(html)
+        self.assertEqual(chart_a.count("<polyline"), 3)   # chart A still draws the pack_lost curve
+        self.assertTrue([t for t in TITLE_RE.findall(chart_a) if "test %d:" % lost in t])
+        self.assertEqual(chart_b.count('class="dot"'), 2)
+        titles_b = [t for t in TITLE_RE.findall(chart_b) if "test " in t]
+        self.assertEqual(len(titles_b), 2)
+        self.assertFalse([t for t in titles_b if "test %d:" % lost in t], titles_b)
+        ticks_b = [b for a, b in TEXT_RE.findall(chart_b) if 'class="tick"' in a and "-" in b]
+        self.assertNotIn("2026-09-10", ticks_b)
+        section_b = html[html.index("<h2>Delivered Ah by date</h2>"):]
+        section_b = section_b[:section_b.index("</section>")]
+        self.assertTrue(section_b.rstrip().endswith('</svg>\n<p class="chart-note">pack_lost tests are not plotted'
+                                                    ' here</p>'), section_b[-200:])
+
+    def test_no_chart_b_note_without_pack_lost_tests(self):
+        self.assertNotIn("not plotted here", self.html())
+
+    def test_only_pack_lost_tests_leave_chart_b_empty_with_the_note(self):
+        p = self.store.add_pack("gone", "li-ion", rated_ah=10.0)
+        add_finished(self.store, p.id, "10", 0.5, reason="pack_lost")
+        html = self.html("gone")
+        self.assertEqual(len(SVG_RE.findall(html)), 1)   # chart A only
+        self.assertIn('<p class="empty">no capacity to plot</p>\n<p class="chart-note">pack_lost tests are not'
+                      ' plotted here</p>', html)
+
+    def test_html_table_marks_pack_lost_in_the_end_column(self):
+        first, lost, last = self.lost_pack()
+        html = self.html("lost")
+        rows = re.findall(r"<tr><td class=\"num\">(\d+)</td>.*?</tr>", html)
+        self.assertEqual(rows, [str(first), str(lost), str(last)])
+        ends = re.findall(r"<td( class=\"lost\")?>([^<]*)</td></tr>", html)
+        self.assertEqual(ends, [("", "cutoff"), (' class="lost"', "pack_lost: not a capacity result"),
+                                ("", "cutoff")])
+
+    def test_pack_lost_mark_and_note_wear_ink_colours_only(self):
+        self.lost_pack()
+        html = self.html("lost")
+        for selector in (".lost", ".chart-note"):
+            rules = [body for sels, body in re.findall(r"([^{}]+)\{([^{}]*)\}", html)
+                     if selector in [s.strip() for s in sels.split(",")]]
+            self.assertTrue(rules, selector)
+            for body in rules:
+                for colour in re.findall(r"(?<![-\w])color:([^;]+)", body):
+                    self.assertIn(colour.strip(), ("var(--ink)", "var(--ink2)"), (selector, body))
 
     def test_unknown_pack_raises_store_error(self):
         from ebctool.store import StoreError

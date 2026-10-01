@@ -32,6 +32,18 @@ HEADROOM_CV = 50           # preflight: idle voltage >= cutoff + 0.50 V
 CUTOFF_MARGIN_CV = 5       # end: lower of ending and last sampled voltage <= cutoff + 0.05 V counts as cutoff
 MAX_TIME_MARGIN_S = 5.0    # end: runtime >= max minutes - 5 s counts as max_time
 
+# Pack loss (R39). A pack pulled off the tester and an e-bike pack whose BMS cuts off on low
+# voltage look the same on the wire: the voltage collapses towards 0 V, and the tester, seeing it
+# below the cutoff, ends the run with its usual finished frame (bench test 2026-09-30: one running
+# frame at 40.69 V and 0.00 A, then finished at 0.00 V). A real cutoff stops at the cutoff, a
+# little under it at most as the tester reacts. So when the tester ends a run, pack_lost is judged
+# before the cutoff rule: the ending frame under 1.00 V, or the lower of the ending and last sampled
+# voltage more than max(2.00 V, 10% of the cutoff) below the cutoff. While running, an active frame
+# under 1.00 V ends the run at once: no pack is on the leads, whatever the cutoff.
+PACK_LOST_FLOOR_CV = 100       # 1.00 V
+PACK_LOST_MIN_DROP_CV = 200    # 2.00 V
+PACK_LOST_DROP_PERCENT = 10    # of the cutoff
+
 
 def _cv(volts: float) -> int:
     """Volts to whole centivolts."""
@@ -58,7 +70,7 @@ class Sample:
 
 @dataclass(frozen=True)
 class SessionResult:
-    end_reason: str     # cutoff | max_time | user_stop | comm_lost | device_error
+    end_reason: str     # cutoff | max_time | pack_lost | user_stop | comm_lost | device_error
     runtime_s: float
     ah_host: float
     wh_host: float
@@ -69,6 +81,13 @@ class SessionResult:
     firmware: str | None
     frames: int
     bad_frames: int
+    collapsed_v: Optional[float] = None   # pack_lost only: the voltage the pack loss was judged on
+
+
+def pack_lost_text(volts: float) -> str:
+    """The line the console summary and the run log add when a test ends as pack_lost."""
+    return ("pack voltage collapsed to %.2f V: pack disconnected or its BMS cut off; this test is not a"
+            " capacity result" % volts)
 
 
 class PreflightError(Exception):
@@ -91,6 +110,10 @@ class CommLost(Exception):
 
 class UserStop(Exception):
     """stop_requested() returned true while the discharge was starting or running."""
+
+
+class PackLost(Exception):
+    """A running (active) frame read below 1.00 V: the pack was pulled or its BMS cut off."""
 
 
 class Sink(Protocol):
@@ -138,6 +161,7 @@ class DischargeSession:
         self._t_active0: Optional[float] = None
         self._last_t_s: Optional[float] = None
         self._last_sampled_v: Optional[float] = None   # volts of the last active frame that made a Sample
+        self._collapsed_v: Optional[float] = None      # set when the run is judged pack_lost
         self._minute = 0
 
     # --- before Start ----------------------------------------------------------------
@@ -232,6 +256,9 @@ class DischargeSession:
         except CommLost as exc:
             self._log("decision", "%s; comm_lost" % exc)
             end_reason = "comm_lost"
+        except PackLost as exc:
+            self._log("decision", "%s; pack_lost" % exc)
+            end_reason = "pack_lost"
         except Exception as exc:
             self._log("exception", exc)
             self._log("decision", "unexpected %s; ending as device_error" % type(exc).__name__)
@@ -246,6 +273,8 @@ class DischargeSession:
         self._log("decision", "session ended: %s after %.1f s, %.4f Ah host, %s Ah device, %.2f V,"
                   " frames=%d bad_frames=%d" % (result.end_reason, result.runtime_s, result.ah_host, ah_device,
                                                 result.end_v, result.frames, result.bad_frames))
+        if result.collapsed_v is not None:
+            self._log("decision", pack_lost_text(result.collapsed_v))
         for sink in self.sinks:
             try:
                 sink.on_end(result)
@@ -272,6 +301,7 @@ class DischargeSession:
                               % (status.state, now - t_start))
                     self._t_active0 = now
                     self._take(status)
+                    self._check_pack(status)
                     return True
             self._check_silence()
             if self.clock.now() >= deadline:
@@ -287,6 +317,7 @@ class DischargeSession:
                     self._last = status
                     return self._device_end_reason(status)
                 self._take(status)
+                self._check_pack(status)
             self._check_silence()
             self._timer_sync()
 
@@ -309,14 +340,29 @@ class DischargeSession:
         for sink in self.sinks:
             sink.on_sample(sample)
 
+    def _check_pack(self, status: Status) -> None:
+        """While running, an active frame under 1.00 V means the pack is gone: end the run now
+        rather than wait for the tester's finished frame."""
+        if status.state == "active" and _cv(status.volts) < PACK_LOST_FLOOR_CV:
+            self._collapsed_v = status.volts
+            raise PackLost("active frame at %.2f V, below %.2f V" % (status.volts, PACK_LOST_FLOOR_CV / 100))
+
     def _device_end_reason(self, status: Status) -> str:
         """Once the load is off the voltage rebounds, so a frame read after a real cutoff can sit
         well above it: judge the cutoff on the lower of the ending frame and the last sampled
-        active frame (the ending frame alone if nothing was sampled)."""
+        active frame (the ending frame alone if nothing was sampled). A collapse far below the
+        cutoff is judged first, as pack_lost (see PACK_LOST_FLOOR_CV)."""
         runtime = self.clock.now() - self._t_active0
         plan = self.plan
         judged = status.volts if self._last_sampled_v is None else min(status.volts, self._last_sampled_v)
-        if _cv(judged) <= _cv(plan.cutoff_v) + CUTOFF_MARGIN_CV:
+        cutoff_cv = _cv(plan.cutoff_v)
+        # Floor division keeps the 10% exact: a whole-centivolt drop exceeds cutoff_cv * 10 / 100
+        # exactly when it exceeds cutoff_cv * 10 // 100.
+        max_drop_cv = max(PACK_LOST_MIN_DROP_CV, cutoff_cv * PACK_LOST_DROP_PERCENT // 100)
+        if _cv(status.volts) < PACK_LOST_FLOOR_CV or cutoff_cv - _cv(judged) > max_drop_cv:
+            reason = "pack_lost"
+            self._collapsed_v = judged
+        elif _cv(judged) <= cutoff_cv + CUTOFF_MARGIN_CV:
             reason = "cutoff"
         elif plan.max_minutes > 0 and runtime >= plan.max_minutes * 60 - MAX_TIME_MARGIN_S:
             reason = "max_time"
@@ -351,7 +397,7 @@ class DischargeSession:
         return SessionResult(end_reason=end_reason, runtime_s=runtime, ah_host=self._integ.ah, wh_host=self._integ.wh,
                              ah_device_final=ah_device, start_v=first.volts, end_v=last.volts,
                              device_model=first.model_name, firmware=self.firmware, frames=self.frames,
-                             bad_frames=self.device.bad_frames)
+                             bad_frames=self.device.bad_frames, collapsed_v=self._collapsed_v)
 
     # --- device and log helpers ------------------------------------------------------
 

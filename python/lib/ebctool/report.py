@@ -13,6 +13,10 @@ surface, so every coloured voltage curve carries a direct end label with its tes
 Start times are stored in UTC. The tables show each in UTC and in local time (the environment's
 zone: TZ if set, else the system zone); chart labels use the local calendar day, and tooltips and
 chart B's value label carry both forms (R37).
+
+A pack_lost test (pack unplugged, or its BMS cut off) is a finished test and is listed like any
+other, but it is not a capacity result: the HTML table marks it in the end column and chart B
+leaves it out, saying so below the chart, so a BMS trip does not look like capacity fade (R39).
 """
 from __future__ import annotations
 
@@ -58,6 +62,10 @@ PALETTE = (
     ("s7", "#4a3aa7", "#9085e9"),
     ("s8", "#e34948", "#e66767"),
 )
+
+PACK_LOST = "pack_lost"
+LOST_END_TEXT = "pack_lost: not a capacity result"   # the HTML table's end cell for a pack_lost test
+LOST_NOTE = "pack_lost tests are not plotted here"     # under chart B when any were left out
 
 COLUMNS = (("id", ">"), ("started UTC", "<"), ("started local", "<"), ("current A", ">"), ("cutoff V", ">"),
            ("Ah", ">"), ("% rated", ">"), ("Ah device", ">"), ("Wh", ">"), ("runtime", ">"), ("start V", ">"),
@@ -309,8 +317,9 @@ def _day_numbers(dates: Sequence[str]) -> list[float]:
 
 def _capacity_chart(pack: Pack, rows: Sequence[HistoryRow]) -> str:
     """One series in slot 1 on a zero-based Ah axis (up to the rated Ah if that is higher), 8 px
-    markers with a surface ring, and the last point's value labelled beside it."""
-    rows = [r for r in rows if r.ah_host is not None]
+    markers with a surface ring, and the last point's value labelled beside it. pack_lost tests
+    are left out: they are not capacity results."""
+    rows = [r for r in rows if r.ah_host is not None and r.end_reason != PACK_LOST]
     if not rows:
         return '<p class="empty">no capacity to plot</p>'
     ahs = [r.ah_host for r in rows]
@@ -360,7 +369,7 @@ body{margin:32px auto;max-width:848px;padding:0 24px;background:var(--surface);c
   font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 h1{font-size:20px;font-weight:600;margin:0 0 4px}
 h2{font-size:15px;font-weight:600;margin:28px 0 8px}
-.summary,.notes,.empty{color:var(--ink2);margin:0 0 4px}
+.summary,.notes,.empty,.chart-note{color:var(--ink2);margin:0 0 4px}
 svg{display:block;width:100%%;max-width:800px;height:auto}
 svg text{font-size:11px;fill:var(--muted);font-variant-numeric:tabular-nums}
 svg .lbl{fill:var(--ink2)}
@@ -382,6 +391,7 @@ caption{caption-side:top;text-align:left;font-weight:600;font-size:15px;padding-
 th,td{padding:4px 10px;border-bottom:1px solid var(--grid);text-align:left;white-space:nowrap}
 th{color:var(--ink2);font-weight:600}
 .num{text-align:right}
+.lost{font-weight:600}
 """
 
 PAGE = """<!DOCTYPE html>
@@ -424,9 +434,14 @@ def _html_table(pack: Pack, rows: Sequence[HistoryRow]) -> str:
     def cls(align: str) -> str:
         return ' class="num"' if align == ">" else ""
 
+    def row(r: HistoryRow) -> str:
+        cells = ["<td%s>%s</td>" % (cls(a), _esc(c)) for c, (_, a) in zip(_cells(r), COLUMNS)]
+        if r.end_reason == PACK_LOST:   # the end column is the last
+            cells[-1] = '<td class="lost">%s</td>' % _esc(LOST_END_TEXT)
+        return "<tr>%s</tr>" % "".join(cells)
+
     head = "".join('<th scope="col"%s>%s</th>' % (cls(a), _esc(h)) for h, a in COLUMNS)
-    body = "\n".join("<tr>%s</tr>" % "".join("<td%s>%s</td>" % (cls(a), _esc(c)) for c, (_, a) in zip(_cells(r), COLUMNS))
-                     for r in rows)
+    body = "\n".join(row(r) for r in rows)
     return ('<div class="scroll"><table>\n<caption>%s tests, oldest first</caption>\n<thead><tr>%s</tr></thead>\n'
             '<tbody>\n%s\n</tbody>\n</table></div>'
             % (_esc(pack.name), head, body))
@@ -439,7 +454,10 @@ def _page(pack: Pack, rows: Sequence[HistoryRow], curves: dict) -> str:
         body.append('<p class="notes">notes: %s</p>' % _esc(pack.notes))
     if rows:
         body.append("<section>\n<h2>Voltage under load</h2>\n%s\n</section>" % _voltage_chart(pack, rows, curves))
-        body.append("<section>\n<h2>Delivered Ah by date</h2>\n%s\n</section>" % _capacity_chart(pack, rows))
+        note = ""
+        if any(r.end_reason == PACK_LOST for r in rows):
+            note = '\n<p class="chart-note">%s</p>' % _esc(LOST_NOTE)
+        body.append("<section>\n<h2>Delivered Ah by date</h2>\n%s%s\n</section>" % (_capacity_chart(pack, rows), note))
     body.append(_html_table(pack, rows))
     return PAGE % (title, _css(), "\n".join(body))
 
