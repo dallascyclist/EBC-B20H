@@ -68,9 +68,10 @@ For `discover`, leave the tester on its testing screen (not the settings screen)
 front-panel test running; it sends Connect, prints what comes back, and sends Disconnect.
 
 Both launchers use `venv/bin/python` when it exists, otherwise `python3`. `bin/ebc.sh` puts
-`/usr/local/bin`, `/usr/bin` and `/bin` ahead of your `PATH`, so on a Mac with Homebrew in
-`/opt/homebrew` it can find Apple's `/usr/bin/python3` (3.9) first and stop with "ebctool
-requires Python 3.12 or newer". A venv makes the choice explicit; install nothing into it:
+`/usr/local/bin`, `/opt/homebrew/bin`, `/usr/bin` and `/bin` ahead of your `PATH`, in that order,
+so a Homebrew Python 3.12 or newer is found before Apple's `/usr/bin/python3` (3.9). If the
+`python3` it finds is older, it stops with "ebctool requires Python 3.12 or newer". A venv makes
+the choice explicit; install nothing into it:
 
     /opt/homebrew/bin/python3 -m venv venv             # any Python 3.12 or newer
 

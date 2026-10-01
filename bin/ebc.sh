@@ -6,7 +6,7 @@
 set -eu
 # A minimal environment (cron, launchd, a bare shell) may lack these: give it a PATH,
 # a private umask for the logs and database, and UTF-8 regardless of the locale.
-PATH="/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin${PATH:+:$PATH}"; export PATH
+PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin${PATH:+:$PATH}"; export PATH
 umask 027
 PYTHONUTF8=1; export PYTHONUTF8
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
