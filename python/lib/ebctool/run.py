@@ -219,7 +219,7 @@ def _print(ctx: RunContext, lines: Sequence[str]) -> None:
 
 
 PACK_COLUMNS = (("name", "<"), ("chemistry", "<"), ("cells", ">"), ("nominal V", ">"), ("rated Ah", ">"),
-                ("created", "<"))
+                ("created UTC", "<"), ("created local", "<"))
 TEST_COLUMNS = (("id", ">"), ("started UTC", "<"), ("started local", "<"), ("current A", ">"), ("cutoff V", ">"),
                 ("end", "<"), ("Ah", ">"), ("Wh", ">"), ("runtime", ">"))
 
@@ -253,7 +253,7 @@ def cmd_pack_list(args, config: Config, ctx: RunContext) -> int:
     with closing(_open_store(config, ctx.store_factory)) as store:
         packs = store.list_packs()
     _print(ctx, _table(PACK_COLUMNS, [(p.name, p.chemistry, _fmt(p.cells_series, "%d"), _fmt(p.nominal_v, "%.1f"),
-                                       _fmt(p.rated_ah, "%.2f"), p.created_at) for p in packs]))
+                                       _fmt(p.rated_ah, "%.2f"), *utc_and_local(p.created_at)) for p in packs]))
     return EXIT_OK
 
 
@@ -261,10 +261,11 @@ def cmd_pack_show(args, config: Config, ctx: RunContext) -> int:
     with closing(_open_store(config, ctx.store_factory)) as store:
         pack = store.get_pack(args.name)
         tests = store.list_tests(args.name)
+    created_utc, created_local = utc_and_local(pack.created_at)
     fields = (("name", pack.name), ("chemistry", pack.chemistry), ("cells", _fmt(pack.cells_series, "%d")),
               ("nominal V", _fmt(pack.nominal_v, "%.1f")), ("rated Ah", _fmt(pack.rated_ah, "%.2f")),
-              ("notes", pack.notes or "-"), ("created", pack.created_at))
-    _print(ctx, ["%-10s %s" % f for f in fields] + [""] + _tests_table(tests))
+              ("notes", pack.notes or "-"), ("created UTC", created_utc), ("created local", created_local))
+    _print(ctx, ["%-13s %s" % f for f in fields] + [""] + _tests_table(tests))
     return EXIT_OK
 
 

@@ -323,6 +323,35 @@ class RulingTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.started_cells(*out.splitlines()), ("2026-10-01 02:42Z", "2026-10-01 02:42 UTC"))
 
+    # R40: a pack's created time in UTC and in local time, as the test start columns (R37)
+
+    def test_pack_list_and_show_give_created_in_utc_and_local_time(self):
+        use_tz(self, "America/Chicago")
+        with mock.patch("ebctool.store._utc_now", return_value="2026-10-01T02:41:10Z"):
+            self.seed_test()
+        code, out, _ = self.main("pack", "list")
+        self.assertEqual(code, 0)
+        header, row = out.splitlines()
+        utc, local = header.index("created UTC"), header.index("created local")
+        self.assertEqual((row[utc:local].strip(), row[local:]), ("2026-10-01 02:41Z", "2026-09-30 21:41 CDT"))
+        self.assertNotIn("2026-10-01T02:41:10Z", out)
+        code, out, _ = self.main("pack", "show", "rad52")
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertIn("created UTC   2026-10-01 02:41Z", lines)
+        self.assertIn("created local 2026-09-30 21:41 CDT", lines)
+        self.assertEqual(lines[0], "name          rad52")   # labels padded to the longest, created local
+        self.assertNotIn("2026-10-01T02:41:10Z", out)
+
+    def test_pack_created_under_tz_utc_shows_the_same_time_twice(self):
+        use_tz(self, "UTC")
+        with mock.patch("ebctool.store._utc_now", return_value="2026-10-01T02:41:10Z"):
+            self.seed_test()
+        _, out, _ = self.main("pack", "list")
+        header, row = out.splitlines()
+        utc, local = header.index("created UTC"), header.index("created local")
+        self.assertEqual((row[utc:local].strip(), row[local:]), ("2026-10-01 02:41Z", "2026-10-01 02:41 UTC"))
+
     def test_pack_show_lists_its_tests(self):
         self.seed_test()
         code, out, _ = self.main("pack", "show", "rad52")

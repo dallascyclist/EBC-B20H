@@ -229,7 +229,8 @@ show each one twice, in columns `started UTC` (`2026-10-01 02:42Z`) and `started
 (`2026-09-30 21:42 CDT`). Local time is the environment's: the `TZ` variable if it is set,
 otherwise the system time zone, so `TZ=UTC bin/ebc.sh history --pack NAME` shows UTC in both
 columns. The charts label and place each test by its local calendar day, so that test is dated
-2026-09-30; the chart tooltips and the latest-value label give both forms.
+2026-09-30; the chart tooltips and the latest-value label give both forms. `pack list` and
+`pack show` give the time each pack was added the same way, as `created UTC` and `created local`.
 
 Ah and "% rated" use the host-integrated Ah. The tester's own count is shown beside it, but its
 encoding above 10 Ah has not yet been verified on the B20H. "% rated" needs `--rated-ah` on the
