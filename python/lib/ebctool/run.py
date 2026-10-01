@@ -29,6 +29,7 @@ from ebctool.console import ConsoleSink, StoreSink, limit_text, status_line, utc
 from ebctool.device import DeviceError, SerialDevice, list_ports, resolve_port
 from ebctool.log import RunLog, set_current
 from ebctool.protocol import Status
+from ebctool.report import format_table, history_rows, write_html
 from ebctool.session import DischargePlan, DischargeSession, PreflightError
 from ebctool.store import CHEMISTRIES, Pack, Store, StoreError, TestRow
 
@@ -497,7 +498,15 @@ def _discharge(device, plan: DischargePlan, pack: Pack, store: Store, args, conf
 
 
 def cmd_history(args, config: Config, ctx: RunContext) -> int:
-    raise NotImplementedError("Task 10")
+    """The pack's finished tests as a table; with --html also the HTML page (its directory created)."""
+    with closing(_open_store(config, ctx.store_factory)) as store:
+        rows = history_rows(store, args.pack)
+        print(format_table(rows), file=ctx.stdout)
+        if args.html:
+            path = Path(args.html)
+            write_html(store, args.pack, path)
+            print("wrote %s" % path, file=ctx.stdout)
+    return EXIT_OK
 
 
 def _run(args: argparse.Namespace, argv: list[str], source: str, ctx: RunContext) -> int:
