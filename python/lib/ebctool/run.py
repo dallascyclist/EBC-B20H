@@ -3,10 +3,15 @@
 Exit codes: 0 finished; 1 aborted or unexpected exception; 2 stopped by the user; 3 configuration,
 argument or preflight failure with nothing started. User-facing errors go to stdout as "error: ...";
 stderr carries only the run log's WARNING-and-above mirror.
+
+The device commands leave the tester disconnected on every path. discharge never sends Start
+before preflight has passed and the user has confirmed (or given --yes); once Start is sent the
+session owns Stop and Disconnect (spec section 9).
 """
 from __future__ import annotations
 
 import argparse
+import signal
 import sqlite3
 import sys
 import time
@@ -15,13 +20,25 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
+import serial
+
 from ebctool import __version__
+from ebctool import protocol as P
 from ebctool.config import Config, ConfigError, default_config, load_config
-from ebctool.device import SerialDevice, resolve_port
+from ebctool.console import ConsoleSink, StoreSink, limit_text, status_line, utc_iso
+from ebctool.device import DeviceError, SerialDevice, list_ports, resolve_port
 from ebctool.log import RunLog, set_current
-from ebctool.store import CHEMISTRIES, Store, StoreError, TestRow
+from ebctool.protocol import Status
+from ebctool.session import DischargePlan, DischargeSession, PreflightError
+from ebctool.store import CHEMISTRIES, Pack, Store, StoreError, TestRow
 
 EXIT_OK, EXIT_ABORTED, EXIT_USER_STOP, EXIT_CONFIG = 0, 1, 2, 3
+EXIT_BY_END_REASON = {"cutoff": EXIT_OK, "max_time": EXIT_OK, "user_stop": EXIT_USER_STOP,
+                      "comm_lost": EXIT_ABORTED, "device_error": EXIT_ABORTED}
+NO_ANSWER = "no answer from tester: leave the settings screen, stop any panel-started test, and check the port"
+MAX_MINUTES = 999
+LOW_CUTOFF_V_PER_CELL = 2.5
+READ_STEP_S = 1.0   # longest single read in discover and monitor
 DEFAULT_CONFIG = Path("config/config.ini")
 # Python 3.14 colours argparse help on a terminal; console output carries no colour escapes.
 _NO_COLOR = {"color": False} if sys.version_info >= (3, 14) else {}
@@ -38,8 +55,14 @@ class SystemClock:
 
 
 def default_device_factory(config: Config, port: Optional[str]):
-    return SerialDevice(resolve_port(port or config.serial.port), parity=config.serial.parity,
-                        baud=config.serial.baud, log_frames=config.run.log_frames)
+    """SerialDevice on --port, else [serial] port ('auto' resolved). DeviceError when no port is
+    found or the port cannot be opened."""
+    path = resolve_port(port or config.serial.port)
+    try:
+        return SerialDevice(path, parity=config.serial.parity, baud=config.serial.baud,
+                            log_frames=config.run.log_frames)
+    except (serial.SerialException, OSError) as exc:
+        raise DeviceError("cannot open %s: %s" % (path, exc)) from exc
 
 
 @dataclass(frozen=True)
@@ -257,20 +280,220 @@ def cmd_export(args, config: Config, ctx: RunContext) -> int:
     return EXIT_OK
 
 
+# device commands
+
+def _close(device, log: RunLog) -> None:
+    try:
+        device.close()
+    except Exception as exc:
+        log.warning("run.device", "closing the port failed: %s: %s" % (type(exc).__name__, exc))
+
+
+def _disconnect_and_close(device, log: RunLog) -> None:
+    """For discover and monitor, which send Connect themselves: best-effort Disconnect, then close."""
+    try:
+        device.send(P.disconnect())
+        log.decision("run.device", "sent Disconnect")
+    except Exception as exc:
+        log.warning("run.device", "Disconnect not sent: %s: %s" % (type(exc).__name__, exc))
+    _close(device, log)
+
+
+def _ask(ctx: RunContext, prompt: str) -> bool:
+    """True only for a typed y or Y; end of input counts as no."""
+    ctx.stdout.write(prompt)
+    ctx.stdout.flush()
+    return ctx.stdin.readline().strip() in ("y", "Y")
+
+
 def cmd_ports(args, config: Config, ctx: RunContext) -> int:
-    raise NotImplementedError("Task 9")
+    ports = list_ports()
+    for device, description in ports:
+        print("%s  %s" % (device, description), file=ctx.stdout)
+    if not ports:
+        print("no serial ports", file=ctx.stdout)
+    setting = args.port or config.serial.port
+    try:
+        chosen = resolve_port(setting)
+    except DeviceError as exc:   # only 'auto' can fail to resolve
+        print("%s: %s" % (setting, exc), file=ctx.stdout)
+    else:
+        if setting == "auto":
+            print("auto picks %s" % chosen, file=ctx.stdout)
+        else:
+            print("port %s (from %s)" % (chosen, "--port" if args.port else "[serial] port"), file=ctx.stdout)
+    return EXIT_OK
 
 
 def cmd_discover(args, config: Config, ctx: RunContext) -> int:
-    raise NotImplementedError("Task 9")
+    if not args.seconds > 0:
+        raise ConfigError("--seconds must be a positive number, got %g" % args.seconds)
+    device = ctx.device_factory(config, args.port)
+    frames = 0
+    try:
+        ctx.log.decision("run.discover", "sending Connect; listening for %g s" % args.seconds)
+        device.send(P.connect())
+        t0 = ctx.clock.now()
+        deadline = t0 + args.seconds
+        while True:
+            remaining = deadline - ctx.clock.now()
+            if remaining <= 0:
+                break
+            status = device.read(min(remaining, READ_STEP_S))
+            if status is not None:
+                frames += 1
+                print(status_line(status, ctx.clock.now() - t0, raw=args.raw), file=ctx.stdout, flush=True)
+        bad = device.bad_frames
+    finally:
+        _disconnect_and_close(device, ctx.log)
+    if frames == 0:
+        ctx.log.info("run.discover", "error: %s" % NO_ANSWER)
+        print("error: %s" % NO_ANSWER, file=ctx.stdout)
+        return EXIT_ABORTED
+    print("%d %s in %g s, %d bad" % (frames, "frame" if frames == 1 else "frames", args.seconds, bad),
+          file=ctx.stdout)
+    return EXIT_OK
 
 
 def cmd_monitor(args, config: Config, ctx: RunContext) -> int:
-    raise NotImplementedError("Task 9")
+    device = ctx.device_factory(config, args.port)
+    try:
+        try:
+            ctx.log.decision("run.monitor", "sending Connect; printing frames until Ctrl-C")
+            device.send(P.connect())
+            t0 = ctx.clock.now()
+            while True:
+                status = device.read(READ_STEP_S)
+                if status is not None:
+                    print(status_line(status, ctx.clock.now() - t0), file=ctx.stdout, flush=True)
+        except KeyboardInterrupt:
+            ctx.log.decision("run.monitor", "Ctrl-C; stopping")
+    finally:
+        _disconnect_and_close(device, ctx.log)
+    print("\nstopped by Ctrl-C; tester disconnected", file=ctx.stdout)
+    return EXIT_USER_STOP
+
+
+def _check_range(what: str, value, low, high, unit: str = "", source: str = "") -> None:
+    """ConfigError naming the value and the allowed range; written so NaN fails too."""
+    if not (low <= value <= high):
+        raise ConfigError("%s %g%s is outside %g..%g%s%s" % (what, value, unit, low, high, unit, source))
+
+
+def _check_plan(args, config: Config) -> None:
+    lim = config.limits
+    _check_range("--current", args.current, lim.min_current_a, lim.max_current_a, " A",
+                 " ([limits] min_current_a..max_current_a)")
+    _check_range("--cutoff", args.cutoff, lim.min_cutoff_v, lim.max_cutoff_v, " V",
+                 " ([limits] min_cutoff_v..max_cutoff_v)")
+    _check_range("--max-minutes", args.max_minutes, 0, MAX_MINUTES)
+
+
+def _low_cutoff_ok(args, pack: Pack, ctx: RunContext) -> bool:
+    """Below 2.5 V per cell needs --yes or a typed y. False: the user declined."""
+    cells = pack.cells_series
+    if not cells or not args.cutoff < cells * LOW_CUTOFF_V_PER_CELL:
+        return True
+    print("warning: cutoff %.2f V is below %d cells x %.1f V = %.2f V"
+          % (args.cutoff, cells, LOW_CUTOFF_V_PER_CELL, cells * LOW_CUTOFF_V_PER_CELL), file=ctx.stdout)
+    if args.yes:
+        ctx.log.decision("run.discharge", "cutoff below %.1f V per cell accepted by --yes" % LOW_CUTOFF_V_PER_CELL)
+        return True
+    if _ask(ctx, "Discharge below %.1f V per cell? [y/N] " % LOW_CUTOFF_V_PER_CELL):
+        ctx.log.decision("run.discharge", "cutoff below %.1f V per cell confirmed" % LOW_CUTOFF_V_PER_CELL)
+        return True
+    ctx.log.decision("run.discharge", "cutoff below %.1f V per cell not confirmed; not started" % LOW_CUTOFF_V_PER_CELL)
+    print("not started", file=ctx.stdout)
+    return False
+
+
+def _preflight_message(exc: PreflightError, cutoff_v: float) -> str:
+    if exc.reason == "no_answer":
+        return NO_ANSWER
+    if exc.reason == "not_idle":
+        return "tester is busy (state %s); stop it from the panel first" % exc.status.state
+    return "pack reads %.2f V, cutoff %.2f V needs at least 0.5 V headroom" % (exc.status.volts, cutoff_v)
+
+
+def _connect_and_confirm(session: DischargeSession, pack: Pack, args, ctx: RunContext) -> Optional[Status]:
+    """Connect, preflight, show the reading and ask. Returns the idle frame to start from, or None
+    when the user declined or pressed Ctrl-C. Every way out but a returned frame leaves the tester
+    disconnected: connect() and preflight() send Disconnect themselves before raising, and
+    abandon() covers everything after connect() has returned."""
+    plan = session.plan
+    connected = False
+    try:
+        first = session.connect()
+        connected = True
+        session.preflight(first)
+        cells = ", %d cells" % pack.cells_series if pack.cells_series else ""
+        firmware = " firmware %s" % session.firmware if session.firmware else ""
+        print("pack %s: %s%s" % (pack.name, pack.chemistry, cells), file=ctx.stdout)
+        print("tester %s%s idle; pack reads %.2f V" % (first.model_name, firmware, first.volts), file=ctx.stdout)
+        print("plan: CC %.2f A, cutoff %.2f V, %s" % (plan.current_a, plan.cutoff_v, limit_text(plan.max_minutes)),
+              file=ctx.stdout)
+        if args.yes or _ask(ctx, "Start discharge? [y/N] "):
+            return first
+        session.abandon()
+        ctx.log.decision("run.discharge", "start declined at the prompt; not started")
+        print("not started; tester disconnected", file=ctx.stdout)
+        return None
+    except PreflightError as exc:   # the session has sent Disconnect
+        raise PreflightError(exc.reason, exc.status, _preflight_message(exc, plan.cutoff_v)) from None
+    except KeyboardInterrupt:
+        if connected:
+            session.abandon()
+        ctx.log.decision("run.discharge", "Ctrl-C before Start; not started")
+        print("\nstopped before Start; tester disconnected", file=ctx.stdout)
+        return None
+    except BaseException:
+        if connected:
+            session.abandon()
+        raise
 
 
 def cmd_discharge(args, config: Config, ctx: RunContext) -> int:
-    raise NotImplementedError("Task 9")
+    with closing(_open_store(config, ctx.store_factory)) as store:
+        pack = store.get_pack(args.pack)
+        _check_plan(args, config)
+        if not _low_cutoff_ok(args, pack, ctx):
+            return EXIT_USER_STOP
+        plan = DischargePlan(current_a=args.current, cutoff_v=args.cutoff, max_minutes=args.max_minutes)
+        device = ctx.device_factory(config, args.port)
+        try:
+            return _discharge(device, plan, pack, store, args, config, ctx)
+        finally:
+            _close(device, ctx.log)
+
+
+def _discharge(device, plan: DischargePlan, pack: Pack, store: Store, args, config: Config, ctx: RunContext) -> int:
+    stop = {"requested": False}
+
+    def on_sigint(signum, frame):
+        stop["requested"] = True
+
+    session = DischargeSession(device, plan, [], ctx.clock, silence_timeout_s=config.serial.silence_timeout_s,
+                               stop_requested=lambda: stop["requested"])
+    first = _connect_and_confirm(session, pack, args, ctx)
+    if first is None:
+        return EXIT_USER_STOP
+    try:   # nothing started yet: any failure here only needs Disconnect
+        test_id = store.begin_test(pack.id, utc_iso(), plan.current_a, plan.cutoff_v, plan.max_minutes,
+                                   ctx.log.run_id, args.notes)
+        session.sinks = [ConsoleSink(ctx.stdout, ctx.clock), StoreSink(store, test_id)]
+        previous = signal.signal(signal.SIGINT, on_sigint)
+    except BaseException:
+        session.abandon()
+        raise
+    try:   # from here the session sends Stop then Disconnect on every exit
+        result = session.run_from(first)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    print("saved as test %d" % test_id, file=ctx.stdout)
+    if result.end_reason == "comm_lost":
+        print("lost contact with the tester: check its display and stop it from the panel if it is still running",
+              file=ctx.stdout)
+    return EXIT_BY_END_REASON[result.end_reason]
 
 
 def cmd_history(args, config: Config, ctx: RunContext) -> int:
@@ -284,8 +507,9 @@ def _run(args: argparse.Namespace, argv: list[str], source: str, ctx: RunContext
         log.decision("run.main", "config from %s; database %s%s"
                      % (source, ctx.config.run.db_path, " (--db)" if args.db is not None else ""))
         code = args.func(args, ctx.config, ctx)
-    except (ConfigError, StoreError) as exc:
-        # INFO, not ERROR: the message is already on stdout, and ERROR would repeat it on stderr.
+    except (ConfigError, StoreError, DeviceError, PreflightError) as exc:
+        # Nothing was started on any of these. INFO, not ERROR: the message is already on stdout,
+        # and ERROR would repeat it on stderr.
         log.info("run.main", "error: %s" % exc)
         code = _error(ctx.stdout, exc)
     except KeyboardInterrupt:

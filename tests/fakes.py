@@ -98,3 +98,18 @@ class FakeDevice:
 
     def close(self):
         self.closed = True
+
+
+def make_device_factory(script, device_class=FakeDevice):
+    """A device_factory for run.main: factory(config, port) builds device_class(script, clock) over
+    one shared FakeClock, exposed as factory.clock. factory.last is the latest device built, or
+    None while the command has not opened one."""
+    clock = FakeClock()
+
+    def factory(config, port):
+        factory.last = device_class(list(script), clock)
+        return factory.last
+
+    factory.clock = clock
+    factory.last = None
+    return factory

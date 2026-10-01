@@ -1,13 +1,20 @@
 import contextlib
 import io
 import os
+import signal
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from ebctool import protocol as P
 from ebctool import run as R
+from ebctool.console import ConsoleSink
+from ebctool.device import DeviceError
+from ebctool.session import Sample, SessionResult
 from ebctool.store import SampleRow, Store
-from tests.support import close_log
+from tests.fakes import FakeClock, FakeDevice, make_device_factory
+from tests.support import close_log, hexframe
 
 
 class RunTests(unittest.TestCase):
@@ -325,6 +332,447 @@ class RulingTests(unittest.TestCase):
         self.assertTrue(path.is_file())
         self.assertIn("3 rows", out)
         self.assertIn(str(path), out)
+
+
+IDLE_HEX = "fa 00 00 00 9f 42 00 53 00 00 00 64 03 b4 00 00 1c 41 f8"
+ACTIVE_HEX = "fa 0a 00 64 9f 29 00 01 00 00 00 64 14 c8 00 03 1c 7e f8"
+FIN_CUTOFF_HEX = "fa 14 00 64 9d 5b 00 32 00 00 00 64 14 c8 00 03 1c 23 f8"   # finished at 50.03 V
+NO_ANSWER = "no answer from tester: leave the settings screen, stop any panel-started test, and check the port"
+
+
+class DeviceCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(close_log)
+        self.cfg = Path(self.tmp.name) / "config.ini"
+        self.cfg.write_text("[serial]\nport = /dev/fake\n[run]\nlog_dir = %s/logs\ndb_path = %s/db/t.db\n" % (self.tmp.name, self.tmp.name))
+
+    def main(self, script, *args, stdin="", device_class=FakeDevice):
+        out = io.StringIO()
+        factory = make_device_factory([(t, P.parse_status(hexframe(h))) for t, h in script], device_class)
+        code = R.main(["--config", str(self.cfg), *args], stdout=out, stdin=io.StringIO(stdin), device_factory=factory, clock=factory.clock)
+        return code, out.getvalue(), factory.last
+
+    def add_pack(self):
+        R.main(["--config", str(self.cfg), "pack", "add", "p", "--chemistry", "li-ion", "--cells", "14"], stdout=io.StringIO())
+
+    def test_discover_prints_decoded_frames_and_disconnects(self):
+        code, out, dev = self.main([(0.5, IDLE_HEX)], "discover", "--seconds", "2")
+        self.assertEqual(code, 0)
+        self.assertIn("54.58", out); self.assertIn("EBC-B20H", out)
+        self.assertEqual(dev.sent[-1], P.disconnect())
+
+    def test_discover_no_answer_exits_1_with_hint(self):
+        code, out, _ = self.main([], "discover", "--seconds", "1")
+        self.assertEqual(code, 1)
+        self.assertIn("settings screen", out)
+
+    def test_discharge_happy_path_exit_0_and_rows(self):
+        self.add_pack()
+        script = [(0.5, IDLE_HEX), (6.5, ACTIVE_HEX), (8.5, ACTIVE_HEX), (10.5, FIN_CUTOFF_HEX)]
+        code, out, dev = self.main(script, "discharge", "--pack", "p", "--current", "1", "--cutoff", "50", "--max-minutes", "0", "--yes")
+        self.assertEqual(code, 0)
+        self.assertIn("cutoff", out)
+        self.assertEqual(dev.sent[-2:], [P.stop(), P.disconnect()])
+        code, out = self._plain("tests")
+        self.assertIn("cutoff", out)
+        self.assertEqual(out.count("\n"), 2)   # header + one row
+
+    def _plain(self, *args):
+        out = io.StringIO()
+        code = R.main(["--config", str(self.cfg), *args], stdout=out, stdin=io.StringIO(""))
+        return code, out.getvalue()
+
+    def test_discharge_prompt_declined_exits_2_without_row(self):
+        self.add_pack()
+        code, _, dev = self.main([(0.5, IDLE_HEX)], "discharge", "--pack", "p", "--current", "1", "--cutoff", "50", stdin="n\n")
+        self.assertEqual(code, 2)
+        self.assertNotIn(P.start_cc(1.0, 50.0, 0), dev.sent)
+        self.assertEqual(dev.sent[-1], P.disconnect())
+        _, out = self._plain("tests")
+        self.assertEqual(out.count("\n"), 1)   # header only
+
+    def test_ctrl_c_during_preflight_exits_2_without_test_row(self):
+        self.add_pack()
+        class Boom(io.StringIO):
+            def readline(self):
+                raise KeyboardInterrupt
+        out = io.StringIO()
+        factory = make_device_factory([(0.5, P.parse_status(hexframe(IDLE_HEX)))])
+        code = R.main(["--config", str(self.cfg), "discharge", "--pack", "p", "--current", "1", "--cutoff", "50"], stdout=out, stdin=Boom(), device_factory=factory, clock=factory.clock)
+        self.assertEqual(code, 2)
+        self.assertEqual(factory.last.sent[-1], P.disconnect())
+        _, listing = self._plain("tests")
+        self.assertEqual(listing.count("\n"), 1)  # header only
+
+    def test_discharge_current_out_of_range_exits_3(self):
+        self.add_pack()
+        code, out, _ = self.main([], "discharge", "--pack", "p", "--current", "25", "--cutoff", "50", "--yes")
+        self.assertEqual(code, 3); self.assertIn("current", out.lower())
+
+    def test_discharge_cutoff_above_pack_exits_3(self):
+        self.add_pack()
+        code, out, dev = self.main([(0.5, IDLE_HEX)], "discharge", "--pack", "p", "--current", "1", "--cutoff", "54.3", "--yes")
+        self.assertEqual(code, 3); self.assertIn("headroom", out)
+        self.assertEqual(dev.sent[-1], P.disconnect())
+
+    def test_low_cutoff_warning_needs_yes(self):
+        self.add_pack()   # 14 cells -> warn below 35.0 V
+        code, out, _ = self.main([(0.5, IDLE_HEX)], "discharge", "--pack", "p", "--current", "1", "--cutoff", "30", stdin="n\n")
+        self.assertEqual(code, 2); self.assertIn("below", out)
+
+
+class CtrlCWhenDrained(FakeDevice):
+    """Ctrl-C arrives while waiting for the frame after the last scripted one."""
+
+    def read(self, timeout):
+        if not self._script:
+            raise KeyboardInterrupt
+        return super().read(timeout)
+
+
+class CtrlCOnFirstRead(FakeDevice):
+    def read(self, timeout):
+        raise KeyboardInterrupt
+
+
+class SigintAfterThirdFrame(FakeDevice):
+    """Delivers a real SIGINT to this process right after returning the third frame, recording which
+    handler was installed at that moment and whether the signal raised."""
+
+    def __init__(self, script, clock):
+        super().__init__(script, clock)
+        self.count = 0
+        self.handler = None
+        self.raised = None
+
+    def read(self, timeout):
+        status = super().read(timeout)
+        if status is not None:
+            self.count += 1
+            if self.count == 3:
+                self.handler = signal.getsignal(signal.SIGINT)
+                try:
+                    signal.raise_signal(signal.SIGINT)
+                    self.raised = False
+                except KeyboardInterrupt:
+                    self.raised = True
+        return status
+
+
+class DeviceCommandRulingTests(unittest.TestCase):
+    """Rulings R5, R11, R20/R26, R27 and the exit codes, beyond the brief's tests."""
+
+    main = DeviceCommandTests.main
+    add_pack = DeviceCommandTests.add_pack
+    _plain = DeviceCommandTests._plain
+
+    def setUp(self):
+        DeviceCommandTests.setUp(self)
+        self.db = Path(self.tmp.name) / "db" / "t.db"
+        self.logs = Path(self.tmp.name) / "logs"
+
+    def discharge(self, script, *extra, stdin="", device_class=FakeDevice):
+        return self.main(script, "discharge", "--pack", "p", *extra, stdin=stdin, device_class=device_class)
+
+    def rows(self):
+        with Store(self.db) as st:
+            return [(t, st.samples(t.id)) for t in st.list_tests()]
+
+    def assert_not_started(self, dev):
+        self.assertFalse([f for f in dev.sent if f[1] == P.CMD_START_CC], dev.sent)
+        self.assertEqual(dev.sent[-1], P.disconnect())
+        self.assertTrue(dev.closed)
+        self.assertEqual(self.rows(), [])
+
+    # discover and monitor
+
+    def test_discover_elapsed_time_comes_from_the_injected_clock(self):
+        code, out, dev = self.main([(0.5, IDLE_HEX), (1.5, IDLE_HEX)], "discover", "--seconds", "2")
+        self.assertEqual(code, 0)
+        self.assertIn("0.5 s", out)
+        self.assertIn("1.5 s", out)
+        self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
+        self.assertTrue(dev.closed)
+        self.assertEqual(dev.clock.now(), 2.0)   # listened exactly --seconds on the fake clock
+
+    def test_discover_raw_adds_hex(self):
+        code, out, _ = self.main([(0.5, IDLE_HEX)], "discover", "--seconds", "1", "--raw")
+        self.assertEqual(code, 0)
+        self.assertIn(IDLE_HEX, out)
+        self.assertIn("54.58", out)
+
+    def test_discover_no_answer_message_is_exact(self):
+        code, out, dev = self.main([], "discover", "--seconds", "1")
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "error: %s\n" % NO_ANSWER)
+        self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
+
+    def test_discover_seconds_must_be_positive(self):
+        for value in ("0", "-1", "nan"):
+            with self.subTest(value=value):
+                code, out, dev = self.main([(0.5, IDLE_HEX)], "discover", "--seconds", value)
+                self.assertEqual(code, 3)
+                self.assertTrue(out.startswith("error: --seconds"), out)
+                self.assertIsNone(dev)
+
+    def test_monitor_ctrl_c_disconnects_and_exits_2(self):
+        script = [(0.5, IDLE_HEX), (2.5, IDLE_HEX), (4.5, IDLE_HEX)]
+        code, out, dev = self.main(script, "monitor", device_class=CtrlCWhenDrained)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.count("54.58"), 3)
+        self.assertIn("4.5 s", out)
+        self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
+        self.assertTrue(dev.closed)
+
+    def test_ports_lists_ports_and_the_chosen_one(self):
+        with mock.patch.object(R, "list_ports", return_value=[("/dev/cu.a", "USB Serial"), ("/dev/cu.b", "other")]):
+            code, out = self._plain("ports")
+            self.assertEqual(code, 0)
+            self.assertIn("/dev/cu.a", out); self.assertIn("USB Serial", out); self.assertIn("/dev/cu.b", out)
+            self.assertIn("/dev/fake", out)   # [serial] port in the config
+            with mock.patch.object(R, "resolve_port", return_value="/dev/cu.a") as resolve:
+                code, out = self._plain("ports", "--port", "auto")
+            self.assertEqual(code, 0)
+            resolve.assert_called_once_with("auto")
+            self.assertIn("auto", out.splitlines()[-1]); self.assertIn("/dev/cu.a", out.splitlines()[-1])
+            with mock.patch.object(R, "resolve_port", side_effect=DeviceError("no serial port found; x")):
+                code, out = self._plain("ports", "--port", "auto")
+            self.assertEqual(code, 0)
+            self.assertIn("no serial port found", out)
+
+    # R20/R26: opening the port
+
+    def test_port_that_cannot_open_exits_3(self):
+        self.add_pack()
+        missing = Path(self.tmp.name) / "no-such-port"
+        self.cfg.write_text(self.cfg.read_text().replace("/dev/fake", str(missing)))
+        for args in (["discover", "--seconds", "1"], ["monitor"],
+                     ["discharge", "--pack", "p", "--current", "1", "--cutoff", "50", "--yes"]):
+            with self.subTest(args=args):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = R.main(["--config", str(self.cfg), *args], stdout=out, stdin=io.StringIO(""),
+                                  clock=FakeClock())
+                self.assertEqual(code, 3)
+                self.assertTrue(out.getvalue().startswith("error: cannot open %s: " % missing), out.getvalue())
+                self.assertEqual(err.getvalue(), "")
+        self.assertEqual(self.rows(), [])
+
+    def test_device_error_from_factory_exits_3(self):
+        def no_port(config, port):
+            raise DeviceError("no serial port found; is the tester on a port directly on the Mac?")
+        out = io.StringIO()
+        code = R.main(["--config", str(self.cfg), "monitor"], stdout=out, device_factory=no_port, clock=FakeClock())
+        self.assertEqual(code, 3)
+        self.assertEqual(out.getvalue(), "error: no serial port found; is the tester on a port directly on the Mac?\n")
+
+    # R27: range checks, before the device is opened
+
+    def test_range_checks_exit_3_naming_value_and_range(self):
+        self.add_pack()
+        cases = [(["--current", "0.4", "--cutoff", "50"], "--current 0.4 A", "0.5..20 A"),
+                 (["--current", "25", "--cutoff", "50"], "--current 25 A", "0.5..20 A"),
+                 (["--current", "nan", "--cutoff", "50"], "--current nan A", "0.5..20 A"),
+                 (["--current", "1", "--cutoff", "7.99"], "--cutoff 7.99 V", "8..88 V"),
+                 (["--current", "1", "--cutoff", "88.01"], "--cutoff 88.01 V", "8..88 V"),
+                 (["--current", "1", "--cutoff", "nan"], "--cutoff nan V", "8..88 V"),
+                 (["--current", "1", "--cutoff", "50", "--max-minutes", "-1"], "--max-minutes -1", "0..999"),
+                 (["--current", "1", "--cutoff", "50", "--max-minutes", "1000"], "--max-minutes 1000", "0..999")]
+        for extra, value, allowed in cases:
+            with self.subTest(extra=extra):
+                code, out, dev = self.discharge([(0.5, IDLE_HEX)], *extra, "--yes")
+                self.assertEqual(code, 3)
+                self.assertTrue(out.startswith("error: %s " % value), out)
+                self.assertIn(allowed, out)
+                self.assertIsNone(dev)
+        self.assertEqual(self.rows(), [])
+
+    def test_range_bounds_are_inclusive(self):
+        self.add_pack()
+        code, _, dev = self.discharge([(0.5, IDLE_HEX)], "--current", "20", "--cutoff", "50", "--max-minutes", "999",
+                                      stdin="n\n")
+        self.assertEqual(code, 2)   # passed the checks, opened the device, declined at the prompt
+        self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
+
+    def test_range_follows_config_limits(self):
+        self.add_pack()
+        self.cfg.write_text(self.cfg.read_text() + "[limits]\nmax_current_a = 5\n")
+        code, out, dev = self.discharge([(0.5, IDLE_HEX)], "--current", "6", "--cutoff", "50", "--yes")
+        self.assertEqual(code, 3)
+        self.assertIn("0.5..5 A", out)
+        self.assertIsNone(dev)
+
+    def test_missing_pack_exits_3_before_device(self):
+        code, out, dev = self.discharge([(0.5, IDLE_HEX)], "--current", "1", "--cutoff", "50", "--yes")
+        self.assertEqual(code, 3)
+        self.assertEqual(out, "error: no pack 'p'\n")
+        self.assertIsNone(dev)
+
+    # low-cutoff warning
+
+    def test_low_cutoff_declined_never_opens_the_device(self):
+        self.add_pack()
+        code, out, dev = self.discharge([(0.5, IDLE_HEX)], "--current", "1", "--cutoff", "30", stdin="n\n")
+        self.assertEqual(code, 2)
+        self.assertIn("30.00 V is below 14 cells x 2.5 V = 35.00 V", out)
+        self.assertIsNone(dev)
+
+    def test_low_cutoff_typed_y_goes_on_to_the_start_prompt(self):
+        self.add_pack()
+        code, out, dev = self.discharge([(0.5, IDLE_HEX)], "--current", "1", "--cutoff", "30", stdin="y\nn\n")
+        self.assertEqual(code, 2)
+        self.assertIn("below", out)
+        self.assertIn("Start discharge? [y/N] ", out)
+        self.assert_not_started(dev)
+
+    def test_low_cutoff_with_yes_warns_and_starts(self):
+        self.add_pack()
+        script = [(0.5, IDLE_HEX), (6.5, ACTIVE_HEX), (8.5, FIN_CUTOFF_HEX)]
+        code, out, dev = self.discharge(script, "--current", "1", "--cutoff", "30", "--yes")
+        self.assertIn("below", out)
+        self.assertIn(P.start_cc(1.0, 30.0, 0), dev.sent)
+        self.assertEqual(code, 1)   # finished far above the 30 V cutoff with no time limit: device_error
+        self.assertEqual(self.rows()[0][0].end_reason, "device_error")
+
+    # preflight refusals (exit 3, nothing started, no test row)
+
+    def test_no_answer_through_discharge(self):
+        self.add_pack()
+        code, out, dev = self.discharge([], "--current", "1", "--cutoff", "50", "--yes")
+        self.assertEqual(code, 3)
+        self.assertEqual(out.splitlines()[-1], "error: %s" % NO_ANSWER)
+        self.assert_not_started(dev)
+
+    def test_not_idle_through_discharge(self):
+        self.add_pack()
+        code, out, dev = self.discharge([(0.5, ACTIVE_HEX)], "--current", "1", "--cutoff", "50", "--yes")
+        self.assertEqual(code, 3)
+        self.assertEqual(out.splitlines()[-1], "error: tester is busy (state active); stop it from the panel first")
+        self.assert_not_started(dev)
+
+    def test_voltage_below_cutoff_message_is_exact(self):
+        self.add_pack()
+        code, out, dev = self.discharge([(0.5, IDLE_HEX)], "--current", "1", "--cutoff", "54.3", "--yes")
+        self.assertEqual(code, 3)
+        self.assertEqual(out.splitlines()[-1], "error: pack reads 54.58 V, cutoff 54.30 V needs at least 0.5 V headroom")
+        self.assert_not_started(dev)
+        self.assertEqual(dev.sent, [P.connect(), P.disconnect()])   # preflight's own Disconnect, no second one
+
+    # Ctrl-C and the prompt (R5, R11)
+
+    def test_ctrl_c_during_connect_exits_2_with_one_disconnect(self):
+        self.add_pack()
+        code, out, dev = self.discharge([], "--current", "1", "--cutoff", "50", "--yes", device_class=CtrlCOnFirstRead)
+        self.assertEqual(code, 2)
+        self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
+        self.assert_not_started(dev)
+
+    def test_ctrl_c_at_prompt_abandons(self):
+        self.add_pack()
+        class Boom(io.StringIO):
+            def readline(self):
+                raise KeyboardInterrupt
+        out = io.StringIO()
+        factory = make_device_factory([(0.5, P.parse_status(hexframe(IDLE_HEX)))])
+        code = R.main(["--config", str(self.cfg), "discharge", "--pack", "p", "--current", "1", "--cutoff", "50"],
+                      stdout=out, stdin=Boom(), device_factory=factory, clock=factory.clock)
+        self.assertEqual(code, 2)
+        self.assertEqual(factory.last.sent, [P.connect(), P.disconnect()])
+        self.assert_not_started(factory.last)
+
+    def test_prompt_shows_reading_and_plan_and_declines_on_anything_but_y(self):
+        self.add_pack()
+        for answer in ("n\n", "\n", "", "yes\n", "q\n"):
+            with self.subTest(answer=answer):
+                code, out, dev = self.discharge([(0.5, IDLE_HEX)], "--current", "1", "--cutoff", "50", stdin=answer)
+                self.assertEqual(code, 2)
+                self.assertIn("54.58 V", out)
+                self.assertIn("1.00 A", out)
+                self.assertIn("50.00 V", out)
+                self.assertIn("Start discharge? [y/N] ", out)
+                self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
+        self.assertEqual(self.rows(), [])
+
+    # runs that started
+
+    def test_happy_path_rows_and_console(self):
+        self.add_pack()
+        script = [(0.5, IDLE_HEX), (6.5, ACTIVE_HEX), (8.5, ACTIVE_HEX), (10.5, FIN_CUTOFF_HEX)]
+        code, out, dev = self.discharge(script, "--current", "1", "--cutoff", "50", "--notes", "first", stdin="Y\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(dev.sent, [P.connect(), P.start_cc(1.0, 50.0, 0), P.stop(), P.disconnect()])
+        self.assertTrue(dev.closed)
+        [(test, samples)] = self.rows()
+        self.assertEqual(test.end_reason, "cutoff")
+        self.assertRegex(test.started_at, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertRegex(test.ended_at, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual((test.set_current_a, test.cutoff_v, test.max_minutes, test.notes), (1.0, 50.0, 0, "first"))
+        self.assertEqual((test.device_model, test.firmware), ("EBC-B20H", None))
+        self.assertAlmostEqual(test.start_v, 54.58); self.assertAlmostEqual(test.end_v, 50.03)
+        self.assertAlmostEqual(test.runtime_s, 4.0)
+        self.assertTrue((self.logs / (test.run_id + ".log")).is_file())
+        self.assertEqual([s.t_s for s in samples], [0.0, 2.0])
+        self.assertIn("\r  t=00:00:02  54.33 V  1.00 A", out)
+        self.assertIn("saved as test %d" % test.id, out)
+        self.assertNotIn("\x1b", out)
+
+    def test_ctrl_c_during_run_is_user_stop_with_finished_row(self):
+        self.add_pack()
+        before = signal.getsignal(signal.SIGINT)
+        script = [(0.5, IDLE_HEX)] + [(6.5 + 2 * k, ACTIVE_HEX) for k in range(10)]
+        code, out, dev = self.discharge(script, "--current", "1", "--cutoff", "50", "--yes",
+                                        device_class=SigintAfterThirdFrame)
+        self.assertEqual(code, 2)
+        self.assertFalse(dev.raised)                  # the flag handler took the signal, not KeyboardInterrupt
+        self.assertIsNot(dev.handler, before)
+        self.assertIs(signal.getsignal(signal.SIGINT), before)   # restored afterwards
+        self.assertEqual(dev.sent[-2:], [P.stop(), P.disconnect()])
+        self.assertEqual(dev.sent.count(P.disconnect()), 1)
+        [(test, samples)] = self.rows()
+        self.assertEqual(test.end_reason, "user_stop")
+        self.assertIsNotNone(test.ended_at)
+        self.assertEqual(len(samples), 2)
+        self.assertIn("user_stop", out)
+
+    def test_comm_lost_exits_1_and_keeps_partial_samples(self):
+        self.add_pack()
+        script = [(0.5, IDLE_HEX), (6.5, ACTIVE_HEX), (8.5, ACTIVE_HEX)]   # then silence
+        code, out, dev = self.discharge(script, "--current", "1", "--cutoff", "50", stdin="y\n")
+        self.assertEqual(code, 1)
+        self.assertEqual(dev.sent[-2:], [P.stop(), P.disconnect()])
+        [(test, samples)] = self.rows()
+        self.assertEqual(test.end_reason, "comm_lost")
+        self.assertEqual([s.t_s for s in samples], [0.0, 2.0])
+        self.assertIn("comm_lost", out)
+        self.assertIn("panel", out)   # tells the user to check the tester itself
+
+    def test_signal_handler_untouched_when_not_started(self):
+        self.add_pack()
+        before = signal.getsignal(signal.SIGINT)
+        self.discharge([(0.5, IDLE_HEX)], "--current", "1", "--cutoff", "50", stdin="n\n")
+        self.assertIs(signal.getsignal(signal.SIGINT), before)
+
+
+class ConsoleSinkTests(unittest.TestCase):
+    def test_live_line_rewrites_one_80_column_line(self):
+        out = io.StringIO()
+        sink = ConsoleSink(out, FakeClock())
+        sink.on_sample(Sample(154.0, 54.21, 1.0, 0.043, 2.34, 0.04, "active"))
+        self.assertEqual(out.getvalue(), "\r" + "  t=00:02:34  54.21 V  1.00 A  0.043 Ah  2.34 Wh  active".ljust(80))
+
+    def test_end_prints_newline_then_six_line_summary(self):
+        out = io.StringIO()
+        ConsoleSink(out, FakeClock()).on_end(
+            SessionResult("cutoff", 3723.0, 5.123, 250.0, 5.1, 54.58, 50.03, "EBC-B20H", "3.08", 100, 0))
+        text = out.getvalue()
+        self.assertTrue(text.startswith("\n"), repr(text))
+        lines = text[1:].splitlines()
+        self.assertEqual(len(lines), 6, lines)
+        for want in ("cutoff", "01:02:03", "5.123", "5.100", "250.00", "54.58", "50.03"):
+            self.assertIn(want, text)
+        self.assertNotIn("\x1b", text)
 
 
 if __name__ == "__main__":
