@@ -62,7 +62,7 @@ class SessionResult:
     runtime_s: float
     ah_host: float
     wh_host: float
-    ah_device_final: float
+    ah_device_final: Optional[float]   # None when no active frame was seen (the run never started)
     start_v: float
     end_v: float
     device_model: str
@@ -242,8 +242,10 @@ class DischargeSession:
             self._best_effort(P.disconnect(), "Disconnect")
             self._log("decision", "sent Stop then Disconnect")
         result = self._result(end_reason, first, t_end)
-        self._log("decision", "session ended: %s after %.1f s, %.4f Ah host, %.3f Ah device, %.2f V"
-                  % (result.end_reason, result.runtime_s, result.ah_host, result.ah_device_final, result.end_v))
+        ah_device = "-" if result.ah_device_final is None else "%.3f" % result.ah_device_final
+        self._log("decision", "session ended: %s after %.1f s, %.4f Ah host, %s Ah device, %.2f V,"
+                  " frames=%d bad_frames=%d" % (result.end_reason, result.runtime_s, result.ah_host, ah_device,
+                                                result.end_v, result.frames, result.bad_frames))
         for sink in self.sinks:
             try:
                 sink.on_end(result)
@@ -342,9 +344,12 @@ class DischargeSession:
 
     def _result(self, end_reason: str, first: Status, t_end: float) -> SessionResult:
         last = self._last or first
-        runtime = 0.0 if self._t_active0 is None else t_end - self._t_active0
+        active = self._t_active0 is not None
+        runtime = t_end - self._t_active0 if active else 0.0
+        # Before any active frame the tester still shows the previous run's capacity: not this test's.
+        ah_device = last.ah_device if active else None
         return SessionResult(end_reason=end_reason, runtime_s=runtime, ah_host=self._integ.ah, wh_host=self._integ.wh,
-                             ah_device_final=last.ah_device, start_v=first.volts, end_v=last.volts,
+                             ah_device_final=ah_device, start_v=first.volts, end_v=last.volts,
                              device_model=first.model_name, firmware=self.firmware, frames=self.frames,
                              bad_frames=self.device.bad_frames)
 

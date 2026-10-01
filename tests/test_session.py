@@ -119,6 +119,15 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(sink.ended.end_reason, "device_error")
         self.assertEqual(dev.sent[-2:], [P.stop(), P.disconnect()])
 
+    def test_never_active_run_has_no_device_ah(self):
+        script = [(0.5, IDLE)] + [(2.5 + 2 * k, IDLE) for k in range(9)]
+        sess, _, sink, _ = self.make(script)
+        r = sess.run()
+        self.assertEqual(r.end_reason, "device_error")
+        self.assertIsNone(r.ah_device_final)
+        self.assertIsNone(sink.ended.ah_device_final)
+        self.assertAlmostEqual(r.end_v, 54.58)   # the last idle reading is still the end voltage
+
     def test_silence_during_run_is_comm_lost(self):
         script = [(0.5, IDLE), (6.5, ACTIVE), (8.5, frame("0a"))]
         sess, dev, sink, _ = self.make(script, silence=10.0)
@@ -381,6 +390,16 @@ class SessionLogTests(unittest.TestCase):
         decisions = [l for l in self.lines() if " DECISION " in l]
         self.assertGreaterEqual(len(decisions), 6)   # connect, idle, preflight, start, active, end, stop+disconnect
         self.assertTrue(any("cutoff" in l for l in decisions[-3:]))
+
+    def test_session_ended_decision_counts_frames_and_bad_frames(self):
+        clock = FakeClock()
+        dev = FakeDevice(CUTOFF_RUN, clock)
+        dev.bad_frames = 2   # as counted by the device's reader
+        r = DischargeSession(dev, PLAN, [], clock).run()
+        [ended] = [l for l in self.lines() if " DECISION " in l and "session ended" in l]
+        self.assertIn("frames=%d" % r.frames, ended)
+        self.assertIn("bad_frames=2", ended)
+        self.assertEqual((r.frames, r.bad_frames), (4, 2))
 
     def test_samples_skipped_for_same_time_are_logged_at_debug(self):
         clock = FakeClock()

@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence
 
+from ebctool.console import hms
 from ebctool.log import current, traced
 from ebctool.store import Pack, SampleRow, Store, TestRow
 
@@ -99,16 +100,9 @@ def _fmt(value, spec: str) -> str:
     return "-" if value is None else spec % value
 
 
-def _hms(seconds: Optional[float]) -> str:
-    if seconds is None:
-        return "-"
-    s = int(round(seconds))
-    return "%d:%02d:%02d" % (s // 3600, s % 3600 // 60, s % 60)
-
-
 def _cells(r: HistoryRow) -> list[str]:
     return [str(r.test_id), r.date, "%.2f" % r.set_current_a, "%.2f" % r.cutoff_v, _fmt(r.ah_host, "%.3f"),
-            _fmt(r.pct_of_rated, "%.1f"), _fmt(r.ah_device, "%.3f"), _fmt(r.wh_host, "%.1f"), _hms(r.runtime_s),
+            _fmt(r.pct_of_rated, "%.1f"), _fmt(r.ah_device, "%.3f"), _fmt(r.wh_host, "%.1f"), hms(r.runtime_s),
             _fmt(r.start_v, "%.2f"), _fmt(r.end_v, "%.2f"), r.end_reason]
 
 
@@ -229,7 +223,7 @@ def _svg(label: str, parts: Sequence[str]) -> str:
 def _test_title(r: HistoryRow) -> str:
     pct = "" if r.pct_of_rated is None else " (%.1f%% of rated)" % r.pct_of_rated
     return ("%s, test %d: %s Ah%s in %s, %s V to %s V, %s"
-            % (r.date, r.test_id, _fmt(r.ah_host, "%.3f"), pct, _hms(r.runtime_s), _fmt(r.start_v, "%.2f"),
+            % (r.date, r.test_id, _fmt(r.ah_host, "%.3f"), pct, hms(r.runtime_s), _fmt(r.start_v, "%.2f"),
                _fmt(r.end_v, "%.2f"), r.end_reason))
 
 

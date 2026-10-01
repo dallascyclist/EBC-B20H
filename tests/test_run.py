@@ -9,7 +9,7 @@ from unittest import mock
 
 from ebctool import protocol as P
 from ebctool import run as R
-from ebctool.console import ConsoleSink
+from ebctool.console import ConsoleSink, hms
 from ebctool.device import DeviceError
 from ebctool.session import Sample, SessionResult
 from ebctool.store import SampleRow, Store
@@ -38,6 +38,12 @@ class RunTests(unittest.TestCase):
     def test_bad_argument_exits_3(self):
         code, _ = self.main("discharge", "--pack", "x")   # missing --current/--cutoff
         self.assertEqual(code, 3)
+
+    def test_non_positive_silence_timeout_exits_3(self):
+        self.cfg.write_text(self.cfg.read_text() + "[serial]\nsilence_timeout_s = 0\n")
+        code, out = self.main("pack", "list")
+        self.assertEqual(code, 3)
+        self.assertTrue(out.startswith("error: [serial] silence_timeout_s"), out)
 
     def test_missing_config_file_exits_3(self):
         out = io.StringIO()
@@ -750,9 +756,33 @@ class DeviceCommandRulingTests(unittest.TestCase):
         self.assertAlmostEqual(test.runtime_s, 4.0)
         self.assertTrue((self.logs / (test.run_id + ".log")).is_file())
         self.assertEqual([s.t_s for s in samples], [0.0, 2.0])
-        self.assertIn("\r  t=00:00:02  54.33 V  1.00 A", out)
+        self.assertIn("\r  t=0:00:02  54.33 V  1.00 A", out)
         self.assertIn("saved as test %d" % test.id, out)
         self.assertNotIn("\x1b", out)
+
+    def test_never_active_run_stores_and_shows_no_device_ah(self):
+        self.add_pack()
+        script = [(0.5, IDLE_HEX)] + [(2.5 + 2 * k, IDLE_HEX) for k in range(7)]   # Start never takes
+        code, out, dev = self.discharge(script, "--current", "1", "--cutoff", "50", "--yes")
+        self.assertEqual(code, 1)
+        self.assertEqual(dev.sent[-2:], [P.stop(), P.disconnect()])
+        self.assertIn("Ah device   -\n", out)
+        [(test, samples)] = self.rows()
+        self.assertEqual((test.end_reason, test.ah_device_final, samples), ("device_error", None, []))
+        code, out = self._plain("history", "--pack", "p")
+        self.assertEqual(code, 0, out)
+        header, row = out.splitlines()
+        self.assertIn("Ah device", header)
+        self.assertEqual(row.split()[6], "-")   # columns: id date current cutoff Ah %rated Ah-device ...
+        html = Path(self.tmp.name) / "out" / "p.html"
+        code, out = self._plain("history", "--pack", "p", "--html", str(html))
+        self.assertEqual(code, 0, out)
+        self.assertTrue(html.is_file())
+        for args in (("tests",), ("pack", "show", "p")):
+            with self.subTest(args=args):
+                code, out = self._plain(*args)
+                self.assertEqual(code, 0, out)
+                self.assertIn("device_error", out)
 
     def test_ctrl_c_during_run_is_user_stop_with_finished_row(self):
         self.add_pack()
@@ -796,7 +826,7 @@ class ConsoleSinkTests(unittest.TestCase):
         out = io.StringIO()
         sink = ConsoleSink(out, FakeClock())
         sink.on_sample(Sample(154.0, 54.21, 1.0, 0.043, 2.34, 0.04, "active"))
-        self.assertEqual(out.getvalue(), "\r" + "  t=00:02:34  54.21 V  1.00 A  0.043 Ah  2.34 Wh  active".ljust(80))
+        self.assertEqual(out.getvalue(), "\r" + "  t=0:02:34  54.21 V  1.00 A  0.043 Ah  2.34 Wh  active".ljust(80))
 
     def test_end_prints_newline_then_six_line_summary(self):
         out = io.StringIO()
@@ -806,9 +836,17 @@ class ConsoleSinkTests(unittest.TestCase):
         self.assertTrue(text.startswith("\n"), repr(text))
         lines = text[1:].splitlines()
         self.assertEqual(len(lines), 6, lines)
-        for want in ("cutoff", "01:02:03", "5.123", "5.100", "250.00", "54.58", "50.03"):
+        for want in ("cutoff", "runtime     1:02:03\n", "5.123", "5.100", "250.00", "54.58", "50.03"):
             self.assertIn(want, text)
+        self.assertNotIn("01:02:03", text)
         self.assertNotIn("\x1b", text)
+
+    def test_hms_is_one_format_with_unpadded_hours(self):
+        cases = [(0, "0:00:00"), (154, "0:02:34"), (154.4, "0:02:34"), (3599.6, "1:00:00"), (3723, "1:02:03"),
+                 (12 * 3600 + 300, "12:05:00"), (None, "-")]
+        for seconds, want in cases:
+            with self.subTest(seconds=seconds):
+                self.assertEqual(hms(seconds), want)
 
 
 if __name__ == "__main__":

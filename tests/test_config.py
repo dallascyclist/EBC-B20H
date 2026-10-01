@@ -67,6 +67,11 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "min_current_a"):
             load_config(self.write("[limits]\nmin_current_a = 5\nmax_current_a = 1\n"))
 
+    def test_non_positive_silence_timeout_is_error(self):
+        for value in ("0", "-1", "-0.5"):
+            with self.subTest(value=value), self.assertRaisesRegex(ConfigError, r"\[serial\] silence_timeout_s"):
+                load_config(self.write("[serial]\nsilence_timeout_s = %s\n" % value))
+
     def test_default_config(self):
         c = default_config()
         self.assertEqual(c.serial.parity, "E")

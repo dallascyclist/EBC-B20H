@@ -7,6 +7,7 @@ redrawn with a carriage return and padded so a shorter line covers a longer one.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Optional
 
 from ebctool.protocol import MODE_NAMES, Status
 from ebctool.session import DischargePlan, Sample, SessionResult
@@ -20,9 +21,13 @@ def utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def hms(seconds: float) -> str:
+def hms(seconds: Optional[float]) -> str:
+    """Elapsed time as H:MM:SS, hours not zero-padded (0:02:34, 12:05:00); "-" for None.
+    The one runtime format: the live line, the end summary, the test tables and the report."""
+    if seconds is None:
+        return "-"
     s = int(round(seconds))
-    return "%02d:%02d:%02d" % (s // 3600, s % 3600 // 60, s % 60)
+    return "%d:%02d:%02d" % (s // 3600, s % 3600 // 60, s % 60)
 
 
 def limit_text(max_minutes: int) -> str:
@@ -63,7 +68,7 @@ class ConsoleSink:
         lines = ("end reason  %s" % result.end_reason,
                  "runtime     %s" % hms(result.runtime_s),
                  "Ah host     %.3f" % result.ah_host,
-                 "Ah device   %.3f" % result.ah_device_final,
+                 "Ah device   %s" % ("-" if result.ah_device_final is None else "%.3f" % result.ah_device_final),
                  "Wh host     %.2f" % result.wh_host,
                  "voltage     %.2f V at start, %.2f V at end" % (result.start_v, result.end_v))
         self._write("\n" + "".join(line + "\n" for line in lines))

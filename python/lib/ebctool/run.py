@@ -25,7 +25,7 @@ import serial
 from ebctool import __version__
 from ebctool import protocol as P
 from ebctool.config import Config, ConfigError, default_config, load_config
-from ebctool.console import ConsoleSink, StoreSink, limit_text, status_line, utc_iso
+from ebctool.console import ConsoleSink, StoreSink, hms, limit_text, status_line, utc_iso
 from ebctool.device import DeviceError, SerialDevice, list_ports, resolve_port
 from ebctool.log import RunLog, set_current
 from ebctool.protocol import Status
@@ -192,13 +192,6 @@ def _fmt(value, spec: str) -> str:
     return "-" if value is None else spec % value
 
 
-def _hms(seconds: Optional[float]) -> str:
-    if seconds is None:
-        return "-"
-    s = int(round(seconds))
-    return "%d:%02d:%02d" % (s // 3600, s % 3600 // 60, s % 60)
-
-
 def _table(columns: Sequence[tuple[str, str]], rows: Sequence[Sequence[str]]) -> list[str]:
     """Fixed-width lines: the header, then one per row. columns are (header, '<' or '>' alignment)."""
     widths = [max([len(h)] + [len(r[i]) for r in rows]) for i, (h, _) in enumerate(columns)]
@@ -227,7 +220,7 @@ def _tests_table(tests: Sequence[TestRow], pack_names: Optional[dict[int, str]] 
     rows = []
     for t in tests:
         row = [str(t.id), t.started_at, "%.2f" % t.set_current_a, "%.2f" % t.cutoff_v, t.end_reason or "-",
-               _fmt(t.ah_host, "%.3f"), _fmt(t.wh_host, "%.1f"), _hms(t.runtime_s)]
+               _fmt(t.ah_host, "%.3f"), _fmt(t.wh_host, "%.1f"), hms(t.runtime_s)]
         if pack_names is not None:
             row.insert(1, pack_names[t.pack_id])
         rows.append(row)

@@ -106,6 +106,8 @@ def load_config(path) -> Config:
         baud=_int(cp, "serial", "baud", defaults.baud),
         silence_timeout_s=_float(cp, "serial", "silence_timeout_s", defaults.silence_timeout_s),
     )
+    if not serial.silence_timeout_s > 0:
+        raise ConfigError("[serial] silence_timeout_s must be positive, got %g" % serial.silence_timeout_s)
 
     run_defaults = RunConfig()
     run = RunConfig(
