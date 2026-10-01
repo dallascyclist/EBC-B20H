@@ -14,4 +14,16 @@ if os.path.isdir(LIB) and LIB not in sys.path:
 from ebctool.run import main  # noqa: E402
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    finally:
+        # Console output is best effort (R38). When stdout's reader has gone (a `| tee` killed by
+        # the same Ctrl-C, `| head`), the last flush fails; send what is left to /dev/null so the
+        # interpreter does not report it at exit or replace the exit code with 120.
+        try:
+            if sys.stdout is not None:
+                sys.stdout.flush()
+        except BrokenPipeError:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+    sys.exit(code)

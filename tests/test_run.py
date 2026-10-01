@@ -2,6 +2,8 @@ import contextlib
 import io
 import os
 import signal
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,10 +13,12 @@ from ebctool import protocol as P
 from ebctool import run as R
 from ebctool.console import ConsoleSink, hms
 from ebctool.device import DeviceError
-from ebctool.session import Sample, SessionResult
+from ebctool.session import DischargePlan, Sample, SessionResult
 from ebctool.store import SampleRow, Store
-from tests.fakes import FakeClock, FakeDevice, make_device_factory
-from tests.support import close_log, hexframe
+from tests.fakes import ClosingPipe, FakeClock, FakeDevice, make_device_factory
+from tests.support import close_log, hexframe, make_log
+
+EBC_PY = Path(__file__).resolve().parent.parent / "python" / "scripts" / "ebc.py"
 
 
 class RunTests(unittest.TestCase):
@@ -172,6 +176,36 @@ class RulingTests(unittest.TestCase):
         code = R.main(["--config", str(self.cfg), "pack", "list"], stdout=io.StringIO(),
                       store_factory=interrupted_store)
         self.assertEqual(code, 2)
+
+    # R38: the error printer never raises on a closed stdout; the exit code is unchanged
+
+    def closed_stdout(self):
+        out = ClosingPipe()
+        out.broken = True   # the reader is already gone: every write raises BrokenPipeError
+        return out
+
+    def test_error_printer_survives_closed_stdout(self):
+        cases = ((["pack", "show", "nope"], 3),                 # StoreError after the log is open
+                 (["discharge", "--pack", "x"], 3),             # parse error, before any log
+                 (["--config", str(self.root / "nope.ini"), "pack", "list"], 3))
+        for args, want in cases:
+            with self.subTest(args=args):
+                out, err = self.closed_stdout(), io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = R.main(["--config", str(self.cfg), *args], stdout=out, stdin=io.StringIO(""))
+                self.assertEqual(code, want)
+                self.assertEqual(out.failures, 1)
+                self.assertEqual(err.getvalue(), "")
+
+    def test_unexpected_error_printer_survives_closed_stdout(self):
+        def broken_store(path):
+            raise RuntimeError("disk on fire")
+        out, err = self.closed_stdout(), io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = R.main(["--config", str(self.cfg), "pack", "list"], stdout=out, store_factory=broken_store)
+        self.assertEqual(code, 1)
+        self.assertEqual(out.failures, 1)
+        self.assertIn("disk on fire", self.log_text())
 
     # R9
 
@@ -474,6 +508,21 @@ class SigintAfterThirdFrame(FakeDevice):
                     self.raised = False
                 except KeyboardInterrupt:
                     self.raised = True
+        return status
+
+
+class SigintAndTeeDies(SigintAfterThirdFrame):
+    """SigintAfterThirdFrame under `bin/ebc.sh discharge ... | tee`: the same Ctrl-C kills the tee,
+    so stdout's pipe closes as the signal arrives."""
+
+    def __init__(self, script, clock, pipe):
+        super().__init__(script, clock)
+        self.pipe = pipe
+
+    def read(self, timeout):
+        status = super().read(timeout)
+        if self.handler is not None:
+            self.pipe.close_pipe()
         return status
 
 
@@ -802,6 +851,42 @@ class DeviceCommandRulingTests(unittest.TestCase):
         self.assertEqual(len(samples), 2)
         self.assertIn("user_stop", out)
 
+    def test_ctrl_c_under_tee_is_user_stop_exit_2_despite_closed_stdout(self):
+        """R38, the bench finding: Ctrl-C on `discharge ... | tee` also kills the tee. The pipe
+        closes as the signal arrives, or earlier, just after the pre-Start lines."""
+        self.add_pack()
+        script = [(0.5, P.parse_status(hexframe(IDLE_HEX)))]
+        script += [(6.5 + 2 * k, P.parse_status(hexframe(ACTIVE_HEX))) for k in range(10)]
+        before = signal.getsignal(signal.SIGINT)
+        for name, out in (("at Ctrl-C", ClosingPipe()), ("after the plan line", ClosingPipe(after_text="plan: "))):
+            with self.subTest(pipe=name):
+                factory = make_device_factory(script, lambda script, clock: SigintAndTeeDies(script, clock, out))
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = R.main(["--config", str(self.cfg), "discharge", "--pack", "p", "--current", "1",
+                                   "--cutoff", "50", "--yes"], stdout=out, stdin=io.StringIO(""),
+                                  device_factory=factory, clock=factory.clock)
+                dev = factory.last
+                self.assertEqual(code, 2)
+                self.assertFalse(dev.raised)   # the flag handler took the signal
+                self.assertIs(signal.getsignal(signal.SIGINT), before)
+                self.assertEqual(dev.sent.count(P.start_cc(1.0, 50.0, 0)), 1)
+                self.assertEqual(dev.sent[-2:], [P.stop(), P.disconnect()])
+                self.assertEqual(dev.sent.count(P.disconnect()), 1)
+                self.assertTrue(dev.closed)
+                self.assertTrue(out.broken)
+                self.assertIn("plan: CC 1.00 A", out.getvalue())
+                self.assertEqual(err.getvalue(), "")   # nothing at WARNING or above
+                test, samples = self.rows()[0]         # newest first
+                self.assertEqual(test.end_reason, "user_stop")
+                self.assertIsNotNone(test.ended_at)
+                self.assertEqual(len(samples), 2)
+                log = (self.logs / (test.run_id + ".log")).read_text(encoding="utf-8")
+                self.assertNotIn(" ERROR ", log)
+                self.assertIn("console output stopped", log)
+                self.assertIn("exit 2", log)
+        self.assertEqual(len(self.rows()), 2)
+
     def test_comm_lost_exits_1_and_keeps_partial_samples(self):
         self.add_pack()
         script = [(0.5, IDLE_HEX), (6.5, ACTIVE_HEX), (8.5, ACTIVE_HEX)]   # then silence
@@ -841,12 +926,73 @@ class ConsoleSinkTests(unittest.TestCase):
         self.assertNotIn("01:02:03", text)
         self.assertNotIn("\x1b", text)
 
+    # R38: the first OSError ends console output for the session, without raising
+
+    def test_first_os_error_stops_all_console_output_and_is_logged_once_at_info(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(close_log)
+        log = make_log(tmp.name)
+        out = ClosingPipe(after_writes=1)
+        sink = ConsoleSink(out, FakeClock())
+        sink.on_start(DischargePlan(1.0, 50.0, 0), P.parse_status(hexframe(IDLE_HEX)))   # flush raises
+        sink.on_sample(Sample(2.0, 54.21, 1.0, 0.001, 0.05, 0.0, "active"))
+        sink.on_end(SessionResult("user_stop", 2.0, 0.001, 0.05, 0.0, 54.58, 54.21, "EBC-B20H", None, 3, 0))
+        self.assertEqual((out.writes, out.failures), (1, 1))
+        self.assertTrue(out.getvalue().startswith("starting CC 1.00 A"))
+        lines = [l for l in log.path.read_text(encoding="utf-8").splitlines() if "console" in l]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn(" INFO console.ConsoleSink: console output stopped: BrokenPipeError", lines[0])
+        self.assertEqual(log.stream.getvalue(), "")   # below the stderr mirror
+
+    def test_any_os_error_on_write_counts_and_no_log_is_fine(self):
+        class Gone(io.StringIO):
+            calls = 0
+            def write(self, text):
+                Gone.calls += 1
+                raise OSError(5, "Input/output error")
+        close_log()
+        sink = ConsoleSink(Gone(), FakeClock())
+        sink.on_sample(Sample(2.0, 54.21, 1.0, 0.001, 0.05, 0.0, "active"))
+        sink.on_end(SessionResult("cutoff", 2.0, 0.001, 0.05, 0.0, 54.58, 50.0, "EBC-B20H", None, 3, 0))
+        self.assertEqual(Gone.calls, 1)
+
     def test_hms_is_one_format_with_unpadded_hours(self):
         cases = [(0, "0:00:00"), (154, "0:02:34"), (154.4, "0:02:34"), (3599.6, "1:00:00"), (3723, "1:02:03"),
                  (12 * 3600 + 300, "12:05:00"), (None, "-")]
         for seconds, want in cases:
             with self.subTest(seconds=seconds):
                 self.assertEqual(hms(seconds), want)
+
+
+
+class EntryScriptTests(unittest.TestCase):
+    """R38: python/scripts/ebc.py when stdout's reader is gone before anything is written, as in
+    `bin/ebc.sh ... | head -c 0`. The pipe's read end is closed before the child starts, so its
+    first write always fails: no timing involved."""
+
+    def run_with_closed_stdout(self, *args):
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        try:
+            with tempfile.TemporaryDirectory() as cwd:
+                return subprocess.run([sys.executable, str(EBC_PY), *args], stdout=write_end,
+                                      stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, cwd=cwd, timeout=60)
+        finally:
+            os.close(write_end)
+
+    def test_closed_stdout_keeps_exit_code_and_prints_nothing_on_stderr(self):
+        for args in (["--version"], ["--help"]):
+            with self.subTest(args=args):
+                proc = self.run_with_closed_stdout(*args)
+                self.assertEqual(proc.returncode, 0)
+                self.assertNotIn(b"Exception ignored", proc.stderr)
+                self.assertEqual(proc.stderr, b"")
+
+    def test_closed_stdout_keeps_a_non_zero_exit_code(self):
+        proc = self.run_with_closed_stdout()   # no command: error on stdout, exit 3
+        self.assertEqual(proc.returncode, 3)
+        self.assertEqual(proc.stderr, b"")
 
 
 if __name__ == "__main__":

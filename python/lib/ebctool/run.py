@@ -27,7 +27,7 @@ from ebctool import protocol as P
 from ebctool.config import Config, ConfigError, default_config, load_config
 from ebctool.console import ConsoleSink, StoreSink, hms, limit_text, status_line, utc_iso
 from ebctool.device import DeviceError, SerialDevice, list_ports, resolve_port
-from ebctool.log import RunLog, set_current
+from ebctool.log import RunLog, current, set_current
 from ebctool.protocol import Status
 from ebctool.report import format_table, history_rows, write_html
 from ebctool.session import DischargePlan, DischargeSession, PreflightError
@@ -181,8 +181,20 @@ def _open_store(config: Config, store_factory: Callable):
         raise StoreError("cannot open database %s: %s" % (path, exc)) from exc
 
 
+def _say(stdout, text: str) -> None:
+    """print() for a line whose loss must not change the outcome (R38): the discharge's lines once
+    the device is open, and the error lines. An OSError (BrokenPipeError when the reader of a
+    `| tee` died with the same Ctrl-C) is logged at INFO and dropped; the exit code is unchanged."""
+    try:
+        print(text, file=stdout)
+    except OSError as exc:
+        log = current()
+        if log is not None:
+            log.info("run.output", "not printed (%s: %s): %s" % (type(exc).__name__, exc, text.strip()))
+
+
 def _error(stdout, message) -> int:
-    print("error: %s" % message, file=stdout)
+    _say(stdout, "error: %s" % message)
     return EXIT_CONFIG
 
 
@@ -439,15 +451,15 @@ def _connect_and_confirm(session: DischargeSession, pack: Pack, args, ctx: RunCo
         session.preflight(first)
         cells = ", %d cells" % pack.cells_series if pack.cells_series else ""
         firmware = " firmware %s" % session.firmware if session.firmware else ""
-        print("pack %s: %s%s" % (pack.name, pack.chemistry, cells), file=ctx.stdout)
-        print("tester %s%s idle; pack reads %.2f V" % (first.model_name, firmware, first.volts), file=ctx.stdout)
-        print("plan: CC %.2f A, cutoff %.2f V, %s" % (plan.current_a, plan.cutoff_v, limit_text(plan.max_minutes)),
-              file=ctx.stdout)
+        _say(ctx.stdout, "pack %s: %s%s" % (pack.name, pack.chemistry, cells))
+        _say(ctx.stdout, "tester %s%s idle; pack reads %.2f V" % (first.model_name, firmware, first.volts))
+        _say(ctx.stdout, "plan: CC %.2f A, cutoff %.2f V, %s"
+             % (plan.current_a, plan.cutoff_v, limit_text(plan.max_minutes)))
         if args.yes or _ask(ctx, "Start discharge? [y/N] "):
             return first
         session.abandon()
         ctx.log.decision("run.discharge", "start declined at the prompt; not started")
-        print("not started; tester disconnected", file=ctx.stdout)
+        _say(ctx.stdout, "not started; tester disconnected")
         return None
     except PreflightError as exc:   # the session has sent Disconnect
         raise PreflightError(exc.reason, exc.status, _preflight_message(exc, plan.cutoff_v)) from None
@@ -455,7 +467,7 @@ def _connect_and_confirm(session: DischargeSession, pack: Pack, args, ctx: RunCo
         if connected:
             session.abandon()
         ctx.log.decision("run.discharge", "Ctrl-C before Start; not started")
-        print("\nstopped before Start; tester disconnected", file=ctx.stdout)
+        _say(ctx.stdout, "\nstopped before Start; tester disconnected")
         return None
     except BaseException:
         if connected:
@@ -500,10 +512,10 @@ def _discharge(device, plan: DischargePlan, pack: Pack, store: Store, args, conf
         result = session.run_from(first)
     finally:
         signal.signal(signal.SIGINT, previous)
-    print("saved as test %d" % test_id, file=ctx.stdout)
+    _say(ctx.stdout, "saved as test %d" % test_id)
     if result.end_reason == "comm_lost":
-        print("lost contact with the tester: check its display and stop it from the panel if it is still running",
-              file=ctx.stdout)
+        _say(ctx.stdout, "lost contact with the tester: check its display and stop it from the panel"
+                         " if it is still running")
     return EXIT_BY_END_REASON[result.end_reason]
 
 
@@ -536,7 +548,7 @@ def _run(args: argparse.Namespace, argv: list[str], source: str, ctx: RunContext
         code = EXIT_USER_STOP
     except Exception as exc:
         log.exception("run.main", exc)
-        print("error: unexpected %s: %s (details in %s)" % (type(exc).__name__, exc, log.path), file=ctx.stdout)
+        _say(ctx.stdout, "error: unexpected %s: %s (details in %s)" % (type(exc).__name__, exc, log.path))
         code = EXIT_ABORTED
     log.info("run.main", "exit %d" % code)
     return code

@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
+from ebctool.log import current
 from ebctool.protocol import MODE_NAMES, Status
 from ebctool.session import DischargePlan, Sample, SessionResult
 from ebctool.store import SampleRow, Store
@@ -45,15 +46,32 @@ def status_line(status: Status, elapsed: float, raw: bool = False) -> str:
 
 class ConsoleSink:
     """Progress of one discharge on the console. The clock is the session's; the live line
-    shows each sample's own t_s (seconds since the first active frame)."""
+    shows each sample's own t_s (seconds since the first active frame).
+
+    Console output is best effort (R38): the first OSError from a write or flush (BrokenPipeError
+    when the reader of a `| tee` died with the same Ctrl-C) ends output for the rest of the session,
+    with one INFO line in the run log, and is never raised into the session."""
 
     def __init__(self, stdout, clock):
         self.stdout = stdout
         self.clock = clock
+        self.lost = False
 
     def _write(self, text: str) -> None:
-        self.stdout.write(text)
-        self.stdout.flush()
+        if self.lost:
+            return
+        try:
+            self.stdout.write(text)
+            self.stdout.flush()
+        except OSError as exc:
+            self.lost = True
+            log = current()
+            if log is not None:
+                try:
+                    log.info("console.ConsoleSink", "console output stopped: %s: %s; the run goes on"
+                             % (type(exc).__name__, exc))
+                except Exception:   # a broken log must not end the run either
+                    pass
 
     def on_start(self, plan: DischargePlan, first: Status) -> None:
         self._write("starting CC %.2f A, cutoff %.2f V, %s, from %.2f V; Ctrl-C stops the discharge\n"

@@ -2,10 +2,11 @@ import tempfile
 import unittest
 
 from ebctool import protocol as P
+from ebctool.console import ConsoleSink, StoreSink
 from ebctool.log import set_current
 from ebctool.session import CommLost, DischargePlan, DischargeSession, PreflightError
-from tests.fakes import FakeClock, FakeDevice
-from tests.support import close_log, hexframe, make_log
+from tests.fakes import ClosingPipe, FakeClock, FakeDevice
+from tests.support import close_log, hexframe, make_log, make_store
 
 IDLE = P.parse_status(hexframe("fa 00 00 00 9f 42 00 53 00 00 00 64 03 b4 00 00 1c 41 f8"))       # 54.58 V
 ACTIVE = P.parse_status(hexframe("fa 0a 00 64 9f 29 00 01 00 00 00 64 14 c8 00 03 1c 7e f8"))     # 1.00 A 54.33 V
@@ -407,6 +408,43 @@ class SessionLogTests(unittest.TestCase):
         DischargeSession(FakeDevice(script, clock), PLAN, [], clock).run()
         self.assertTrue([l for l in self.lines() if " DEBUG " in l and "skip" in l.lower()])
 
+
+
+class ConsoleOutputLossTests(unittest.TestCase):
+    """R38: console output is best effort. A stdout that stops taking output part way through a
+    run (the tee of `bin/ebc.sh discharge ... | tee` killed by the same Ctrl-C) changes nothing."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(close_log)
+        self.log = make_log(self.tmp.name)
+        self.store = make_store(self.tmp.name)
+        self.addCleanup(self.store.close)
+
+    def test_closed_stdout_mid_run_still_ends_user_stop_with_finished_row(self):
+        pack = self.store.add_pack("p", "li-ion")
+        tid = self.store.begin_test(pack.id, "2026-09-30T20:00:00Z", 1.0, 50.0, 3, "r")
+        clock = FakeClock()
+        script = [(0.5, IDLE), (6.5, ACTIVE)] + [(8.5 + 2 * k, frame("0a")) for k in range(20)]
+        dev = FakeDevice(script, clock)
+        out = ClosingPipe(after_writes=2)   # on_start and the first sample get through, then flush fails
+        sinks = [ConsoleSink(out, clock), StoreSink(self.store, tid)]
+        r = DischargeSession(dev, PLAN, sinks, clock, stop_requested=lambda: clock.now() > 12.0).run()
+        self.assertEqual(r.end_reason, "user_stop")
+        self.assertEqual(dev.sent[-2:], [P.stop(), P.disconnect()])
+        self.assertEqual(dev.sent.count(P.disconnect()), 1)
+        self.assertEqual((out.writes, out.failures), (2, 1))   # nothing tried after the first failure
+        test = self.store.get_test(tid)
+        self.assertEqual(test.end_reason, "user_stop")
+        self.assertIsNotNone(test.ended_at)
+        self.assertGreater(len(self.store.samples(tid)), 2)   # every sample stored, printed or not
+        lines = self.log.path.read_text(encoding="utf-8").splitlines()
+        lost = [l for l in lines if "console output stopped" in l]
+        self.assertEqual(len(lost), 1, lost)
+        self.assertIn(" INFO ", lost[0])
+        self.assertIn("BrokenPipeError", lost[0])
+        self.assertFalse([l for l in lines if " WARNING " in l or " ERROR " in l])
 
 
 class BrokenLog:

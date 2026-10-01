@@ -1,4 +1,6 @@
-"""Test doubles for the device layer: a scripted serial port, a manual clock, and a scripted Device."""
+"""Test doubles for the device layer: a scripted serial port, a manual clock, and a scripted Device;
+and a stdout whose pipe closes."""
+import io
 import time
 from collections import deque
 
@@ -113,3 +115,43 @@ def make_device_factory(script, device_class=FakeDevice):
     factory.clock = clock
     factory.last = None
     return factory
+
+
+class ClosingPipe(io.StringIO):
+    """A stdout whose reader goes away, like a pipe into a tee killed by the same Ctrl-C.
+
+    The pipe starts closing on close_pipe(), once `after_writes` writes have gone through, or on a
+    write containing `after_text`. Like a buffered pipe, it still takes writes until the next flush;
+    that flush raises BrokenPipeError and from then on every write and flush does. failures counts
+    the raises."""
+
+    def __init__(self, after_writes=None, after_text=None):
+        super().__init__()
+        self.after_writes = after_writes
+        self.after_text = after_text
+        self.writes = 0
+        self.closing = False
+        self.broken = False
+        self.failures = 0
+
+    def close_pipe(self):
+        self.closing = True
+
+    def _fail(self):
+        self.broken = True
+        self.failures += 1
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def write(self, text):
+        if self.broken:
+            self._fail()
+        self.writes += 1
+        if self.after_writes is not None and self.writes >= self.after_writes:
+            self.closing = True
+        if self.after_text is not None and self.after_text in text:
+            self.closing = True
+        return super().write(text)
+
+    def flush(self):
+        if self.broken or self.closing:
+            self._fail()
