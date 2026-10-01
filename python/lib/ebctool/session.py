@@ -29,7 +29,7 @@ ACTIVE_WAIT_S = 10.0       # Start must produce an active frame within this, els
 TIMER_SYNC_S = 60.0        # vendor software sends elapsed minutes once a minute
 MAX_READ_STEP_S = 1.0      # longest single read, so stop_requested() is polled at least this often
 HEADROOM_CV = 50           # preflight: idle voltage >= cutoff + 0.50 V
-CUTOFF_MARGIN_CV = 5       # end: last voltage <= cutoff + 0.05 V counts as cutoff
+CUTOFF_MARGIN_CV = 5       # end: lower of ending and last sampled voltage <= cutoff + 0.05 V counts as cutoff
 MAX_TIME_MARGIN_S = 5.0    # end: runtime >= max minutes - 5 s counts as max_time
 
 
@@ -137,6 +137,7 @@ class DischargeSession:
         self._integ = _Integrator()
         self._t_active0: Optional[float] = None
         self._last_t_s: Optional[float] = None
+        self._last_sampled_v: Optional[float] = None   # volts of the last active frame that made a Sample
         self._minute = 0
 
     # --- before Start ----------------------------------------------------------------
@@ -300,22 +301,27 @@ class DischargeSession:
                       % (t_s, self._last_t_s))
             return
         self._last_t_s = t_s
+        self._last_sampled_v = status.volts
         self._integ.push(t_s, status.amps, status.volts)
         sample = Sample(t_s, status.volts, status.amps, self._integ.ah, self._integ.wh, status.ah_device, status.state)
         for sink in self.sinks:
             sink.on_sample(sample)
 
     def _device_end_reason(self, status: Status) -> str:
+        """Once the load is off the voltage rebounds, so a frame read after a real cutoff can sit
+        well above it: judge the cutoff on the lower of the ending frame and the last sampled
+        active frame (the ending frame alone if nothing was sampled)."""
         runtime = self.clock.now() - self._t_active0
         plan = self.plan
-        if _cv(status.volts) <= _cv(plan.cutoff_v) + CUTOFF_MARGIN_CV:
+        judged = status.volts if self._last_sampled_v is None else min(status.volts, self._last_sampled_v)
+        if _cv(judged) <= _cv(plan.cutoff_v) + CUTOFF_MARGIN_CV:
             reason = "cutoff"
         elif plan.max_minutes > 0 and runtime >= plan.max_minutes * 60 - MAX_TIME_MARGIN_S:
             reason = "max_time"
         else:
             reason = "device_error"
-        self._log("decision", "tester reported %s at %.2f V after %.1f s; %s"
-                  % (status.state, status.volts, runtime, reason))
+        self._log("decision", "tester reported %s at %.2f V after %.1f s (judged on %.2f V); %s"
+                  % (status.state, status.volts, runtime, judged, reason))
         return reason
 
     def _timer_sync(self) -> None:

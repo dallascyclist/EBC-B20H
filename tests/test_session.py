@@ -33,6 +33,12 @@ def frame(cmd_hex, amps_hex="00 64", volts_hex="9f 29", cap_hex="00 01"):
     return P.parse_status(_fix(hexframe("fa %s %s %s %s 00 00 00 64 14 c8 00 03 1c 00 f8" % (cmd_hex, amps_hex, volts_hex, cap_hex))))
 
 
+def volts_hex(volts):
+    """Live-voltage field for volts: 10 mV units offset 0x800, base 240, bit 7 set on the high byte."""
+    hi, lo = divmod(round(volts * 100) + 0x800, 240)
+    return "%02x %02x" % (hi | 0x80, lo)
+
+
 def script_full_run():
     s = [(0.5, IDLE), (2.5, IDLE), (6.5, ACTIVE), (8.5, FW_ACTIVE)]
     t = 10.5
@@ -295,6 +301,37 @@ class SessionExitPathTests(unittest.TestCase):
         script = [(0.5, IDLE), (6.5, ACTIVE), (8.5, frame("14", volts_hex="95 d9"))]
         sess, _, _, _ = self.make(script, plan=DischargePlan(1.0, 32.04, 0))
         self.assertEqual(sess.run().end_reason, "cutoff")
+
+    # R30: after a real cutoff the load is off and the voltage rebounds, so the end reason is
+    # judged on the lower of the ending frame and the last sampled active frame.
+
+    def test_lost_finished_frame_with_rebounded_idle_is_cutoff(self):
+        idle = frame("00", amps_hex="00 00", volts_hex=volts_hex(51.20))
+        sag = frame("0a", volts_hex=volts_hex(50.02))
+        self.assertEqual((idle.volts, sag.volts), (51.20, 50.02))
+        sess, _, _, _ = self.make([(0.5, IDLE), (6.5, ACTIVE), (8.5, sag), (10.5, idle)])
+        r = sess.run()
+        self.assertEqual(r.end_reason, "cutoff")
+        self.assertEqual(r.end_v, 51.20)   # what the pack read at the end; only the classification changed
+
+    def test_rebounded_finished_frame_is_cutoff(self):
+        finished = frame("14", volts_hex=volts_hex(51.20))
+        sag = frame("0a", volts_hex=volts_hex(50.03))
+        self.assertEqual((finished.volts, sag.volts), (51.20, 50.03))
+        sess, _, _, _ = self.make([(0.5, IDLE), (6.5, ACTIVE), (8.5, sag), (10.5, finished)])
+        r = sess.run()
+        self.assertEqual(r.end_reason, "cutoff")
+        self.assertEqual(r.end_v, 51.20)
+
+    def test_idle_end_above_cutoff_is_still_device_error(self):
+        high = frame("0a", volts_hex=volts_hex(53.10))
+        idle = frame("00", amps_hex="00 00", volts_hex=volts_hex(53.00))
+        self.assertEqual((high.volts, idle.volts), (53.10, 53.00))
+        sess, _, _, _ = self.make([(0.5, IDLE), (6.5, high), (8.5, high), (10.5, idle)],
+                                  plan=DischargePlan(1.0, 50.0, 0))
+        r = sess.run()
+        self.assertEqual(r.end_reason, "device_error")
+        self.assertEqual(r.end_v, 53.00)
 
     def test_preflight_boundary_compares_in_centivolts(self):
         # 16.06 V -> 1606 + 2048 = 3654 = 15*240 + 54 -> hi 0x8f, lo 0x36; float 15.56 + 0.5 > 16.06
