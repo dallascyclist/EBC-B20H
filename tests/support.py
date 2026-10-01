@@ -53,7 +53,7 @@ def hexframe(text):
 
 def use_tz(case, name):
     """Local time is TZ=name for the rest of the test; the previous TZ (or its absence) comes back
-    at cleanup. Report and listing dates follow the environment's zone (R37)."""
+    at cleanup. Report and listing dates follow the environment's zone."""
     old = os.environ.get("TZ")
 
     def restore():

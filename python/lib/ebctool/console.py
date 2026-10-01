@@ -65,7 +65,7 @@ class ConsoleSink:
     """Progress of one discharge on the console. The clock is the session's; the live line
     shows each sample's own t_s (seconds since the first active frame).
 
-    Console output is best effort (R38): the first OSError from a write or flush (BrokenPipeError
+    Console output is best effort: the first OSError from a write or flush (BrokenPipeError
     when the reader of a `| tee` died with the same Ctrl-C) ends output for the rest of the session,
     with one INFO line in the run log, and is never raised into the session."""
 

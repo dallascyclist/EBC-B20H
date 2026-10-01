@@ -12,13 +12,13 @@ surface, so every coloured voltage curve carries a direct end label with its tes
 
 Start times are stored in UTC. The tables show each in UTC and in local time (the environment's
 zone: TZ if set, else the system zone); chart labels use the local calendar day, and tooltips and
-chart B's value label carry both forms (R37).
+chart B's value label carry both forms.
 
 A pack_lost test (pack unplugged, or its BMS cut off) is a finished test and is listed like any
 other, but it is not a capacity result: the HTML table marks it in the end column and chart B
-leaves it out, saying so below the chart, so a BMS trip does not look like capacity fade (R39).
+leaves it out, saying so below the chart, so a BMS trip does not look like capacity fade.
 The summary line takes its latest capacity result from the newest test that is not pack_lost, and
-chart A draws no sample under the pack-lost floor, which would stretch its voltage axis to 0 (R41).
+chart A draws no sample under the pack-lost floor, which would stretch its voltage axis to 0.
 """
 from __future__ import annotations
 
@@ -427,7 +427,7 @@ def _css() -> str:
 
 def _summary(pack: Pack, rows: Sequence[HistoryRow]) -> str:
     """Rated Ah; finished tests, with how many were pack_lost; the latest capacity result, from the
-    newest test that is not pack_lost; and a pointer to the newest test when it was pack_lost (R41)."""
+    newest test that is not pack_lost; and a pointer to the newest test when it was pack_lost."""
     parts = ["rated %.2f Ah" % pack.rated_ah if pack.rated_ah is not None else "rated Ah not set"]
     if not rows:
         return "; ".join(parts + ["no finished tests yet: bin/ebc.sh discharge --pack %s adds one" % pack.name])

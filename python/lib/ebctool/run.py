@@ -182,7 +182,7 @@ def _open_store(config: Config, store_factory: Callable):
 
 
 def _say(stdout, text: str) -> None:
-    """print() for a line whose loss must not change the outcome (R38): the discharge's lines once
+    """print() for a line whose loss must not change the outcome: the discharge's lines once
     the device is open, and the error lines. An OSError (BrokenPipeError when the reader of a
     `| tee` died with the same Ctrl-C) is logged at INFO and dropped; the exit code is unchanged."""
     try:
@@ -214,7 +214,7 @@ def _table(columns: Sequence[tuple[str, str]], rows: Sequence[Sequence[str]]) ->
 
 
 def _print(ctx: RunContext, lines: Sequence[str]) -> None:
-    """Listings are best effort too (R41): `pack list | head -n 1` still exits 0."""
+    """Listings are best effort too: `pack list | head -n 1` still exits 0."""
     for line in lines:
         _say(ctx.stdout, line)
 
@@ -525,7 +525,7 @@ def cmd_history(args, config: Config, ctx: RunContext) -> int:
     """The pack's finished tests as a table; with --html also the HTML page (its directory created)."""
     with closing(_open_store(config, ctx.store_factory)) as store:
         rows = history_rows(store, args.pack)
-        _say(ctx.stdout, format_table(rows))   # best effort: a closed stdout still writes the page (R41)
+        _say(ctx.stdout, format_table(rows))   # best effort: a closed stdout still writes the page
         if args.html:
             path = Path(args.html)
             write_html(store, args.pack, path)

@@ -32,7 +32,7 @@ HEADROOM_CV = 50           # preflight: idle voltage >= cutoff + 0.50 V
 CUTOFF_MARGIN_CV = 5       # end: lower of ending and last sampled voltage <= cutoff + 0.05 V counts as cutoff
 MAX_TIME_MARGIN_S = 5.0    # end: runtime >= max minutes - 5 s counts as max_time
 
-# Pack loss (R39). A pack pulled off the tester and an e-bike pack whose BMS cuts off on low
+# Pack loss. A pack pulled off the tester and an e-bike pack whose BMS cuts off on low
 # voltage look the same on the wire: the voltage collapses towards 0 V, and the tester, seeing it
 # below the cutoff, ends the run with its usual finished frame (bench test 2026-09-30: one running
 # frame at 40.69 V and 0.00 A, then finished at 0.00 V). A real cutoff stops at the cutoff, a

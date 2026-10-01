@@ -12,8 +12,6 @@ self-contained HTML page with the voltage curves overlaid and delivered Ah by da
 Python program with nothing to install: the standard library plus a vendored copy of pyserial.
 
 - Wire protocol as observed on the B20H: `docs/PROTOCOL.md`
-- Design: `docs/superpowers/specs/2026-09-30-ebc-b20h-design.md`
-- Implementation plan: `docs/superpowers/plans/2026-09-30-ebctool-v1.md`
 
 ## Quick reference
 

@@ -1,20 +1,50 @@
-# runtime secrets and state: nothing in config/ tracked except the example
+# Local configuration and runtime state: only the example config is tracked
 config/*
 !config/config.example.ini
 logs/
 db/
-venv/
+*.db
+*.sqlite
+*.sqlite3
 
-# python
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+venv/
+.venv/
+env/
+.env
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# tooling and OS
-.DS_Store
+# AI assistant and agent working files (not part of the project)
 .claude/
 .remember/
 .serena/
 .superpowers/
+docs/superpowers/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+GEMINI.md
+.mcp.json
+.cursor/
+.cursorrules
+.windsurf/
+.aider*
+.codex/
+.continue/
+.copilot/
 
-# vendor documentation kept locally (copyright ZKETECH; not redistributed)
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Vendor documentation kept locally (copyright ZKETECH; not redistributed)
 Vendor Docs/

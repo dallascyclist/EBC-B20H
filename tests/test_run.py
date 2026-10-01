@@ -190,7 +190,7 @@ class RulingTests(unittest.TestCase):
                       store_factory=interrupted_store)
         self.assertEqual(code, 2)
 
-    # R38: the error printer never raises on a closed stdout; the exit code is unchanged
+    # the error printer never raises on a closed stdout; the exit code is unchanged
 
     def closed_stdout(self):
         out = ClosingPipe()
@@ -220,7 +220,7 @@ class RulingTests(unittest.TestCase):
         self.assertEqual(out.failures, 1)
         self.assertIn("disk on fire", self.log_text())
 
-    # R41: listings print best effort too, so `bin/ebc.sh pack list | head -n 1` exits 0
+    # listings print best effort too, so `bin/ebc.sh pack list | head -n 1` exits 0
 
     def test_listings_survive_closed_stdout(self):
         self.seed_test()
@@ -343,7 +343,7 @@ class RulingTests(unittest.TestCase):
         code, out, _ = self.main("tests", "--pack", "rad52")
         self.assertEqual((code, len(out.splitlines())), (0, 2))
 
-    # R37: start times in UTC and in the environment's local zone
+    # start times in UTC and in the environment's local zone
 
     def started_cells(self, header, row):
         """The started UTC and started local cells of a listing row, cut at their header's place."""
@@ -368,7 +368,7 @@ class RulingTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.started_cells(*out.splitlines()), ("2026-10-01 02:42Z", "2026-10-01 02:42 UTC"))
 
-    # R40: a pack's created time in UTC and in local time, as the test start columns (R37)
+    # a pack's created time in UTC and in local time, as the test start columns
 
     def test_pack_list_and_show_give_created_in_utc_and_local_time(self):
         use_tz(self, "America/Chicago")
@@ -427,7 +427,7 @@ class RulingTests(unittest.TestCase):
         self.assertTrue((other.parent / ("test-%d.csv" % tid)).is_file())
         self.assertIn("0 rows", out)
 
-    # R24: --config, --db and --port before or after the subcommand; after wins
+    # --config, --db and --port before or after the subcommand; after wins
 
     def test_db_after_subcommand_works(self):
         other = self.root / "elsewhere" / "o.db"
@@ -694,7 +694,7 @@ class DeviceCommandRulingTests(unittest.TestCase):
         self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
         self.assertTrue(dev.closed)
 
-    # R32: monitor gives up when nothing at all answers Connect
+    # monitor gives up when nothing at all answers Connect
 
     def test_monitor_no_frame_within_silence_timeout_exits_3(self):
         code, out, dev = self.main([], "monitor", device_class=CtrlCAfterAMinute)
@@ -736,7 +736,7 @@ class DeviceCommandRulingTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("no serial port found", out)
 
-    # R20/R26: opening the port
+    # opening the port
 
     def test_port_that_cannot_open_exits_3(self):
         self.add_pack()
@@ -762,7 +762,7 @@ class DeviceCommandRulingTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertEqual(out.getvalue(), "error: no serial port found; is the tester on a port directly on the Mac?\n")
 
-    # R27: range checks, before the device is opened
+    # range checks, before the device is opened
 
     def test_range_checks_exit_3_naming_value_and_range(self):
         self.add_pack()
@@ -854,7 +854,7 @@ class DeviceCommandRulingTests(unittest.TestCase):
         self.assert_not_started(dev)
         self.assertEqual(dev.sent, [P.connect(), P.disconnect()])   # preflight's own Disconnect, no second one
 
-    # Ctrl-C and the prompt (R5, R11)
+    # Ctrl-C and the prompt
 
     def test_ctrl_c_during_connect_exits_2_with_one_disconnect(self):
         self.add_pack()
@@ -1092,7 +1092,7 @@ class ConsoleSinkTests(unittest.TestCase):
                          "pack voltage collapsed to 44.99 V: pack disconnected or its BMS cut off;"
                          " this test is not a capacity result")
 
-    # R38: the first OSError ends console output for the session, without raising
+    # the first OSError ends console output for the session, without raising
 
     def test_first_os_error_stops_all_console_output_and_is_logged_once_at_info(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1123,7 +1123,7 @@ class ConsoleSinkTests(unittest.TestCase):
         sink.on_end(SessionResult("cutoff", 2.0, 0.001, 0.05, 0.0, 54.58, 50.0, "EBC-B20H", None, 3, 0))
         self.assertEqual(Gone.calls, 1)
 
-    # R37: one helper turns a stored UTC time into the UTC and local forms every listing shows
+    # one helper turns a stored UTC time into the UTC and local forms every listing shows
 
     def test_utc_and_local_in_chicago(self):
         use_tz(self, "America/Chicago")
@@ -1156,7 +1156,7 @@ class ConsoleSinkTests(unittest.TestCase):
 
 
 class EntryScriptTests(unittest.TestCase):
-    """R38: python/scripts/ebc.py when stdout's reader is gone before anything is written, as in
+    """python/scripts/ebc.py when stdout's reader is gone before anything is written, as in
     `bin/ebc.sh ... | head -c 0`. The pipe's read end is closed before the child starts, so its
     first write always fails: no timing involved."""
 
@@ -1184,7 +1184,7 @@ class EntryScriptTests(unittest.TestCase):
         self.assertEqual(proc.stderr, b"")
 
     def test_other_os_error_at_the_final_flush_keeps_the_exit_code(self):
-        # R41: stdout open read-only, so the final flush fails with EBADF: an OSError, not BrokenPipeError
+        # stdout open read-only, so the final flush fails with EBADF: an OSError, not BrokenPipeError
         for args, want in ((["--version"], 0), ([], 3)):
             with self.subTest(args=args), tempfile.TemporaryDirectory() as cwd:
                 path = Path(cwd) / "stdout"

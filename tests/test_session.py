@@ -218,7 +218,7 @@ class SessionExitPathTests(unittest.TestCase):
         r = sess.run_from(first)
         self.assertEqual(r.end_reason, "cutoff")
         self.assertEqual(dev.sent, [P.connect(), P.start_cc(1.0, 50.0, 3), P.stop(), P.disconnect()])
-        self.assertEqual(r.frames, 4)   # R6: the connect-phase idle frame counts
+        self.assertEqual(r.frames, 4)   # the connect-phase idle frame counts
         self.assertEqual(sinks[0].ends, 1)
         self.assertEqual(sinks[0].started, (PLAN, first))
 
@@ -312,7 +312,7 @@ class SessionExitPathTests(unittest.TestCase):
         sess, _, _, _ = self.make(script, plan=DischargePlan(1.0, 32.04, 0))
         self.assertEqual(sess.run().end_reason, "cutoff")
 
-    # R30: after a real cutoff the load is off and the voltage rebounds, so the end reason is
+    # after a real cutoff the load is off and the voltage rebounds, so the end reason is
     # judged on the lower of the ending frame and the last sampled active frame.
 
     def test_lost_finished_frame_with_rebounded_idle_is_cutoff(self):
@@ -361,7 +361,7 @@ class SessionExitPathTests(unittest.TestCase):
         self.assertEqual((r.device_model, r.firmware), ("EBC-B20H", None))
 
 
-# --- R39: pack_lost ------------------------------------------------------------------
+# --- pack_lost ------------------------------------------------------------------
 # An unplugged pack and an e-bike BMS low-voltage cut-off look the same on the wire: the voltage
 # collapses. Judged before the cutoff rule when the tester ends the run: pack_lost if the ending
 # frame reads below 1.00 V, or if the lower of the ending frame and the last sampled active frame
@@ -546,7 +546,7 @@ class SessionLogTests(unittest.TestCase):
 
 
 class ConsoleOutputLossTests(unittest.TestCase):
-    """R38: console output is best effort. A stdout that stops taking output part way through a
+    """console output is best effort. A stdout that stops taking output part way through a
     run (the tee of `bin/ebc.sh discharge ... | tee` killed by the same Ctrl-C) changes nothing."""
 
     def setUp(self):

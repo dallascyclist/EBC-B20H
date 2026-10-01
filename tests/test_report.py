@@ -60,7 +60,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("started local", text.splitlines()[0])
         self.assertEqual(len(text.splitlines()), 4)
 
-    # R37: start times in UTC and in the environment's local zone; chart labels by local day
+    # start times in UTC and in the environment's local zone; chart labels by local day
 
     def late_evening(self, *starts):
         """Pack 'eve' with one finished test per start time (stored UTC), oldest first."""
@@ -142,7 +142,7 @@ class ReportTests(unittest.TestCase):
         self.late_evening("2026-10-01T02:42:14Z")
         self.assertIn("latest capacity result 2026-09-30 21:42 CDT (2026-10-01 02:42Z): 8.000 Ah", self.html("eve"))
 
-    # R41: the summary line never presents a pack_lost test as the latest capacity result
+    # the summary line never presents a pack_lost test as the latest capacity result
 
     def summary(self, pack):
         [text] = re.findall(r'<p class="summary">(.*?)</p>', self.html(pack))
@@ -198,7 +198,7 @@ class ReportTests(unittest.TestCase):
         html = out.read_text(encoding="utf-8")
         self.assertIn("older (2)", html)
 
-    # R12: percent of rated comes from host-integrated Ah
+    # percent of rated comes from host-integrated Ah
 
     def test_percent_of_rated_uses_host_ah(self):
         p = self.store.add_pack("r12", "li-ion", rated_ah=20.0)
@@ -244,7 +244,7 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("<b>", html)
         self.assertNotIn("<i>", html)
 
-    # R39: a pack_lost test (pack unplugged, or its BMS cut off) is listed and marked, but it is
+    # a pack_lost test (pack unplugged, or its BMS cut off) is listed and marked, but it is
     # not a capacity result, so chart B leaves it out
 
     def lost_pack(self):
@@ -290,7 +290,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn('<p class="empty">no capacity to plot</p>\n<p class="chart-note">pack_lost tests are not'
                       ' plotted here</p>', html)
 
-    # R41: a running sample under the pack-lost floor (1.00 V) does not stretch chart A's shared axis
+    # a running sample under the pack-lost floor (1.00 V) does not stretch chart A's shared axis
 
     def chart_a(self, pack):
         """Chart A's volt tick values and its polylines as {test id: [(x, y), ...]}."""
