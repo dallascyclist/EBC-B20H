@@ -1,5 +1,7 @@
-"""Builders shared by the test modules: config, log, store, and frame helpers."""
+"""Builders shared by the test modules: config, log, store, frame and time zone helpers."""
 import io
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,3 +49,20 @@ def make_store(tmpdir):
 def hexframe(text):
     """'fa 05 00 ... f8' -> bytes."""
     return bytes.fromhex(text.replace(" ", ""))
+
+
+def use_tz(case, name):
+    """Local time is TZ=name for the rest of the test; the previous TZ (or its absence) comes back
+    at cleanup. Report and listing dates follow the environment's zone (R37)."""
+    old = os.environ.get("TZ")
+
+    def restore():
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+    case.addCleanup(restore)
+    os.environ["TZ"] = name
+    time.tzset()

@@ -8,10 +8,12 @@ from pathlib import Path
 from ebctool import run as R
 from ebctool.report import format_table, history_rows, write_html
 from ebctool.store import SampleRow, Store
-from tests.support import close_log, make_log
+from tests.support import close_log, make_log, use_tz
 
 SVG_RE = re.compile(r"<svg\b.*?</svg>", re.S)
 TEXT_RE = re.compile(r"<text\b([^>]*)>(.*?)</text>", re.S)
+TITLE_RE = re.compile(r"<title>(.*?)</title>", re.S)
+TAG_RE = re.compile(r"<[^>]+>")
 
 
 def add_finished(store, pack_id, day, ah, samples=3, ah_device=None, run="r"):
@@ -26,6 +28,7 @@ def add_finished(store, pack_id, day, ah, samples=3, ah_device=None, run="r"):
 
 class ReportTests(unittest.TestCase):
     def setUp(self):
+        use_tz(self, "America/Chicago")
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = Store(Path(self.tmp.name) / "t.db")
@@ -53,8 +56,91 @@ class ReportTests(unittest.TestCase):
 
     def test_table_has_header_and_rows(self):
         text = format_table(history_rows(self.store, "rad52"))
-        self.assertIn("date", text.splitlines()[0])
+        self.assertIn("started UTC", text.splitlines()[0])
+        self.assertIn("started local", text.splitlines()[0])
         self.assertEqual(len(text.splitlines()), 4)
+
+    # R37: start times in UTC and in the environment's local zone; chart labels by local day
+
+    def late_evening(self, *starts):
+        """Pack 'eve' with one finished test per start time (stored UTC), oldest first."""
+        p = self.store.add_pack("eve", "li-ion", rated_ah=10.0)
+        for n, started in enumerate(starts):
+            tid = self.store.begin_test(p.id, started, 5.0, 42.0, 0, "e%d" % n)
+            for k in range(3):
+                self.store.append_sample(tid, SampleRow(tid, 2.0 * k, 54.0 - k, 5.0, 4.0 * k, 50.0 * k, 4.0 * k,
+                                                        "active"))
+            self.store.finish_test(tid, "x", "cutoff", 7200, 8.0 + n, 400.0, 8.0, 54.0, 42.1, "EBC-B20H", "3.08")
+
+    def test_row_carries_utc_local_and_local_day(self):
+        self.late_evening("2026-10-01T02:42:14Z")
+        (row,) = history_rows(self.store, "eve")
+        self.assertEqual((row.started_utc, row.started_local, row.date),
+                         ("2026-10-01 02:42Z", "2026-09-30 21:42 CDT", "2026-09-30"))
+
+    def test_table_shows_start_in_utc_and_local_time(self):
+        self.late_evening("2026-10-01T02:42:14Z")
+        header, line = format_table(history_rows(self.store, "eve")).splitlines()
+        utc, local = header.index("started UTC"), header.index("started local")
+        self.assertLess(header.index("id"), utc)
+        self.assertEqual(line[utc:local].strip(), "2026-10-01 02:42Z")
+        self.assertEqual(line[local:local + len("2026-09-30 21:42 CDT")], "2026-09-30 21:42 CDT")
+        self.assertNotIn(" date ", header)
+
+    def test_tz_utc_shows_the_same_time_in_both_columns(self):
+        use_tz(self, "UTC")
+        self.late_evening("2026-10-01T02:42:14Z")
+        (row,) = history_rows(self.store, "eve")
+        self.assertEqual((row.started_utc, row.started_local, row.date),
+                         ("2026-10-01 02:42Z", "2026-10-01 02:42 UTC", "2026-10-01"))
+        self.assertEqual(row.started_utc[:-1], row.started_local[:-len(" UTC")])
+
+    def test_html_table_has_both_columns_and_charts_use_local_days(self):
+        self.late_evening("2026-10-01T02:42:14Z", "2026-10-01T15:00:00Z")   # local 30 Sep 21:42, 1 Oct 10:00
+        html = self.html("eve")
+        self.assertIn('<th scope="col">started UTC</th><th scope="col">started local</th>', html)
+        self.assertIn("<td>2026-10-01 02:42Z</td><td>2026-09-30 21:42 CDT</td>", html)
+        self.assertIn("<td>2026-10-01 15:00Z</td><td>2026-10-01 10:00 CDT</td>", html)
+        chart_a, chart_b = SVG_RE.findall(html)
+        labels_a = [body for attrs, body in TEXT_RE.findall(chart_a) if 'class="lbl"' in attrs]
+        self.assertEqual(sorted(labels_a), ["2026-09-30", "2026-10-01"])
+        ticks_b = [body for attrs, body in TEXT_RE.findall(chart_b) if 'class="tick"' in attrs and "-" in body]
+        self.assertEqual(ticks_b, ["2026-09-30", "2026-10-01"])   # one local day apart, so both fit
+        self.assertIn("<li><span class=\"key k1\"></span>2026-09-30</li>", html)   # legend
+
+    def test_every_test_tooltip_shows_both_forms(self):
+        self.late_evening("2026-10-01T02:42:14Z", "2026-10-01T15:00:00Z")
+        titles = [t for svg in SVG_RE.findall(self.html("eve")) for t in TITLE_RE.findall(svg) if "test " in t]
+        self.assertEqual(len(titles), 4)   # two curves in chart A, two points in chart B
+        for title in titles:
+            self.assertTrue(("2026-09-30 21:42 CDT" in title and "2026-10-01 02:42Z" in title)
+                            or ("2026-10-01 10:00 CDT" in title and "2026-10-01 15:00Z" in title), title)
+
+    def test_capacity_value_label_shows_both_forms_inside_the_chart(self):
+        self.late_evening("2026-09-20T15:00:00Z", "2026-10-01T02:42:14Z")
+        chart_b = SVG_RE.findall(self.html("eve"))[1]
+        [body] = [b for a, b in TEXT_RE.findall(chart_b) if 'class="val"' in a]
+        lines = [TAG_RE.sub("", part) for part in re.findall(r"<tspan\b[^>]*>.*?</tspan>", body)]
+        self.assertEqual(lines, ["9.00 Ah (90%)", "2026-09-30 21:42 CDT", "2026-10-01 02:42Z"])
+        ys = [float(y) for y in re.findall(r'\by="(-?[\d.]+)"', body)]
+        self.assertEqual(len(ys), 3)
+        self.assertTrue(all(24 <= y <= 320 for y in ys), ys)   # stays between the plot's top and bottom
+
+    def test_capacity_value_label_near_the_bottom_puts_the_dates_above(self):
+        p = self.store.add_pack("low", "li-ion", rated_ah=17.5)
+        add_finished(self.store, p.id, "20", 0.5)
+        add_finished(self.store, p.id, "29", 0.0327)   # the bench test: a sliver of a 17.5 Ah pack
+        chart_b = SVG_RE.findall(self.html("low"))[1]
+        [(_, body)] = [(a, b) for a, b in TEXT_RE.findall(chart_b) if 'class="val"' in a]
+        spans = re.findall(r'<tspan\b[^>]*\by="([\d.]+)"[^>]*>(.*?)</tspan>', body)
+        self.assertEqual([text for _, text in spans], ["2026-09-29 05:00 CDT", "2026-09-29 10:00Z", "0.03 Ah (0%)"])
+        last_cy = float(re.findall(r'class="dot" cx="[\d.]+" cy="([\d.]+)"', chart_b)[-1])
+        self.assertEqual(float(spans[-1][0]), last_cy)                  # the value stays level with its point
+        self.assertTrue(all(float(y) <= 320 for y, _ in spans), spans)  # nothing reaches the date ticks
+
+    def test_summary_names_the_latest_test_in_both_forms(self):
+        self.late_evening("2026-10-01T02:42:14Z")
+        self.assertIn("latest 2026-09-30 21:42 CDT (2026-10-01 02:42Z): 8.000 Ah", self.html("eve"))
 
     def test_html_is_self_contained_with_one_polyline_per_test(self):
         out = Path(self.tmp.name) / "h.html"
@@ -199,6 +285,7 @@ class HistoryCommandTests(unittest.TestCase):
     """history --pack NAME [--html PATH] through run.main."""
 
     def setUp(self):
+        use_tz(self, "America/Chicago")
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.addCleanup(close_log)
@@ -225,8 +312,11 @@ class HistoryCommandTests(unittest.TestCase):
         lines = out.splitlines()
         self.assertEqual(len(lines), 3)
         self.assertIn("% rated", lines[0])
-        self.assertIn("2026-09-01", lines[1]); self.assertIn("90.0", lines[1])
-        self.assertIn("2026-09-15", lines[2]); self.assertIn("85.0", lines[2])
+        self.assertIn("started UTC", lines[0]); self.assertIn("started local", lines[0])
+        self.assertIn("2026-09-01 10:00Z", lines[1]); self.assertIn("2026-09-01 05:00 CDT", lines[1])
+        self.assertIn("90.0", lines[1])
+        self.assertIn("2026-09-15 10:00Z", lines[2]); self.assertIn("2026-09-15 05:00 CDT", lines[2])
+        self.assertIn("85.0", lines[2])
 
     def test_html_writes_file_in_new_directory_and_prints_path(self):
         path = self.root / "out" / "nested" / "rad52.html"
@@ -249,7 +339,7 @@ class HistoryCommandTests(unittest.TestCase):
         code, out, _ = self.main("history", "--pack", "fresh")
         self.assertEqual(code, 0)
         self.assertEqual(len(out.splitlines()), 1)
-        self.assertIn("date", out)
+        self.assertIn("started local", out)
 
 
 if __name__ == "__main__":

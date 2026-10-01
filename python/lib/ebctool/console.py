@@ -22,6 +22,23 @@ def utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def utc_and_local(stamp: str) -> tuple[str, str]:
+    """A stored UTC time (2026-10-01T02:42:14Z) as the two forms the listings and the report
+    show, to the minute: ("2026-10-01 02:42Z", "2026-09-30 21:42 CDT"). Local time is the
+    environment's: TZ if set, else the system zone. Its first ten characters are the local
+    calendar day. Text that is not such a time comes back unchanged in both places."""
+    try:
+        utc = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return stamp, stamp
+    return utc.strftime("%Y-%m-%d %H:%MZ"), _local_text(utc.astimezone())
+
+
+def _local_text(local: datetime) -> str:
+    """2026-09-30 21:42 CDT: the zone's abbreviation, or its numeric offset when it has none."""
+    return local.strftime("%Y-%m-%d %H:%M ") + (local.strftime("%Z") or local.strftime("%z"))
+
+
 def hms(seconds: Optional[float]) -> str:
     """Elapsed time as H:MM:SS, hours not zero-padded (0:02:34, 12:05:00); "-" for None.
     The one runtime format: the live line, the end summary, the test tables and the report."""

@@ -199,25 +199,30 @@ records each decision as a `DECISION` line.
 
 ## History and reports
 
-- `tests [--pack NAME]` lists tests newest first: id, pack, start time (UTC), current, cutoff, end
-  reason, Ah, Wh and runtime. A test whose process was killed before it finished shows `-` as its
-  end reason.
+- `tests [--pack NAME]` lists tests newest first: id, pack, start time in UTC and in local time,
+  current, cutoff, end reason, Ah, Wh and runtime. A test whose process was killed before it
+  finished shows `-` as its end reason.
 - `pack show NAME` prints the pack's details and its tests.
 - `export --test ID [--csv PATH]` writes the test's samples as CSV with the columns
   `t_s, volts, amps, ah_host, wh_host, ah_device, state`, where `t_s` is seconds since the first
   running frame. By default the file is `test-ID.csv` beside the database (`db/test-ID.csv`).
-- `history --pack NAME` prints one line per finished test, oldest first: id, date, current, cutoff,
-  Ah, % of rated, tester Ah, Wh, runtime, start and end voltage, end reason. With `--html PATH` it
-  also writes one self-contained HTML file: voltage under load against elapsed minutes with every
-  test overlaid (the newest eight in colour and labelled by date, older ones in gray), delivered Ah
-  by date, and the same table. The page has no script and loads nothing external; it follows the
-  browser's light or dark setting.
+- `history --pack NAME` prints one line per finished test, oldest first: id, start time in UTC and
+  in local time, current, cutoff, Ah, % of rated, tester Ah, Wh, runtime, start and end voltage,
+  end reason. With `--html PATH` it also writes one self-contained HTML file: voltage under load
+  against elapsed minutes with every test overlaid (the newest eight in colour and labelled by
+  date, older ones in gray), delivered Ah by date, and the same table. The page has no script and
+  loads nothing external; it follows the browser's light or dark setting.
 
-Report dates are the UTC calendar day of the test start, so a test started at 19:30 on 30
-September 2026 in California is dated 2026-10-01. Ah and "% rated" use the host-integrated Ah. The
-tester's own count is shown beside it, but its encoding above 10 Ah has not yet been verified on
-the B20H. "% rated" needs `--rated-ah` on the pack. Tests that never finished are left out of the
-history.
+Start times are stored in UTC. The `tests`, `pack show` and `history` tables and the HTML table
+show each one twice, in columns `started UTC` (`2026-10-01 02:42Z`) and `started local`
+(`2026-09-30 21:42 CDT`). Local time is the environment's: the `TZ` variable if it is set,
+otherwise the system time zone, so `TZ=UTC bin/ebc.sh history --pack NAME` shows UTC in both
+columns. The charts label and place each test by its local calendar day, so that test is dated
+2026-09-30; the chart tooltips and the latest-value label give both forms.
+
+Ah and "% rated" use the host-integrated Ah. The tester's own count is shown beside it, but its
+encoding above 10 Ah has not yet been verified on the B20H. "% rated" needs `--rated-ah` on the
+pack. Tests that never finished are left out of the history.
 
 ## When something goes wrong
 

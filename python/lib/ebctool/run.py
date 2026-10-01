@@ -25,7 +25,7 @@ import serial
 from ebctool import __version__
 from ebctool import protocol as P
 from ebctool.config import Config, ConfigError, default_config, load_config
-from ebctool.console import ConsoleSink, StoreSink, hms, limit_text, status_line, utc_iso
+from ebctool.console import ConsoleSink, StoreSink, hms, limit_text, status_line, utc_and_local, utc_iso
 from ebctool.device import DeviceError, SerialDevice, list_ports, resolve_port
 from ebctool.log import RunLog, current, set_current
 from ebctool.protocol import Status
@@ -220,8 +220,8 @@ def _print(ctx: RunContext, lines: Sequence[str]) -> None:
 
 PACK_COLUMNS = (("name", "<"), ("chemistry", "<"), ("cells", ">"), ("nominal V", ">"), ("rated Ah", ">"),
                 ("created", "<"))
-TEST_COLUMNS = (("id", ">"), ("started", "<"), ("current A", ">"), ("cutoff V", ">"), ("end", "<"), ("Ah", ">"),
-                ("Wh", ">"), ("runtime", ">"))
+TEST_COLUMNS = (("id", ">"), ("started UTC", "<"), ("started local", "<"), ("current A", ">"), ("cutoff V", ">"),
+                ("end", "<"), ("Ah", ">"), ("Wh", ">"), ("runtime", ">"))
 
 
 def _tests_table(tests: Sequence[TestRow], pack_names: Optional[dict[int, str]] = None) -> list[str]:
@@ -231,8 +231,8 @@ def _tests_table(tests: Sequence[TestRow], pack_names: Optional[dict[int, str]] 
         columns.insert(1, ("pack", "<"))
     rows = []
     for t in tests:
-        row = [str(t.id), t.started_at, "%.2f" % t.set_current_a, "%.2f" % t.cutoff_v, t.end_reason or "-",
-               _fmt(t.ah_host, "%.3f"), _fmt(t.wh_host, "%.1f"), hms(t.runtime_s)]
+        row = [str(t.id), *utc_and_local(t.started_at), "%.2f" % t.set_current_a, "%.2f" % t.cutoff_v,
+               t.end_reason or "-", _fmt(t.ah_host, "%.3f"), _fmt(t.wh_host, "%.1f"), hms(t.runtime_s)]
         if pack_names is not None:
             row.insert(1, pack_names[t.pack_id])
         rows.append(row)

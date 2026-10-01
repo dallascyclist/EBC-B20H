@@ -9,6 +9,10 @@ unverified above 10 Ah. Colours are the dataviz reference palette, validated for
 validate_palette.js. Text always wears an ink colour; a series colour goes only on its line, its
 markers and its legend or label key. The light palette has three slots under 3:1 against the
 surface, so every coloured voltage curve carries a direct end label with its test date.
+
+Start times are stored in UTC. The tables show each in UTC and in local time (the environment's
+zone: TZ if set, else the system zone); chart labels use the local calendar day, and tooltips and
+chart B's value label carry both forms (R37).
 """
 from __future__ import annotations
 
@@ -19,20 +23,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence
 
-from ebctool.console import hms
+from ebctool.console import hms, utc_and_local
 from ebctool.log import current, traced
 from ebctool.store import Pack, SampleRow, Store, TestRow
 
 RECENT = 8                       # newest tests drawn in categorical colour; older ones fold into gray
 WIDTH, HEIGHT = 800, 360
 # The brief's margins are left 56, right 24, top 24, bottom 40; the right one is widened so the
-# dated end labels of chart A (and the last-point label of chart B) sit beside the plot.
-LEFT, RIGHT, TOP, BOTTOM = 56, 112, 24, 40
+# dated end labels of chart A and the last-point label of chart B sit beside the plot. That label's
+# local start time (2026-09-30 21:42 CDT) measures about 127 px of 11 px system-ui, 139 px with a
+# numeric zone (+0530); it starts 6 px left of X1, so 144 leaves it 150 px.
+LEFT, RIGHT, TOP, BOTTOM = 56, 144, 24, 40
 X0, X1, Y0, Y1 = LEFT, WIDTH - RIGHT, TOP, HEIGHT - BOTTOM
 LABEL_X = X1 + 8                 # end-label column: 10 px colour key, then the date
 LABEL_STEP = 14                  # end labels are 11 px text, at least this far apart
 POINT_INSET = 16                 # chart B keeps its first and last markers off the plot edges
 DATE_GAP = 80                    # minimum spacing of chart B's date tick labels (each about 60 px)
+VAL_LINE = 13                    # line pitch of chart B's three-line value label (11 px text)
 MAX_POINTS = 400                 # longer curves are thinned evenly; the last sample always stays
 
 # role, light, dark: the dataviz reference palette (surface, ink, secondary ink, muted, gridline, 8 series)
@@ -52,15 +59,20 @@ PALETTE = (
     ("s8", "#e34948", "#e66767"),
 )
 
-COLUMNS = (("id", ">"), ("date", "<"), ("current A", ">"), ("cutoff V", ">"), ("Ah", ">"), ("% rated", ">"),
-           ("Ah device", ">"), ("Wh", ">"), ("runtime", ">"), ("start V", ">"), ("end V", ">"), ("end", "<"))
+COLUMNS = (("id", ">"), ("started UTC", "<"), ("started local", "<"), ("current A", ">"), ("cutoff V", ">"),
+           ("Ah", ">"), ("% rated", ">"), ("Ah device", ">"), ("Wh", ">"), ("runtime", ">"), ("start V", ">"),
+           ("end V", ">"), ("end", "<"))
 
 
 @dataclass(frozen=True)
 class HistoryRow:
-    """One finished test as the report shows it. date is the UTC start day; ah_host is host-integrated."""
+    """One finished test as the report shows it. started_utc and started_local are the start time
+    in both forms (console.utc_and_local); date is the local calendar day of the start, which the
+    charts place and label tests by. ah_host is host-integrated."""
     test_id: int
     date: str
+    started_utc: str
+    started_local: str
     set_current_a: float
     cutoff_v: float
     ah_host: Optional[float]
@@ -76,8 +88,9 @@ class HistoryRow:
 def _row(pack: Pack, t: TestRow) -> HistoryRow:
     rated = pack.rated_ah
     pct = 100.0 * t.ah_host / rated if t.ah_host is not None and rated is not None and rated > 0 else None
-    return HistoryRow(t.id, t.started_at[:10], t.set_current_a, t.cutoff_v, t.ah_host, t.ah_device_final,
-                      t.wh_host, t.runtime_s, t.start_v, t.end_v, pct, t.end_reason)
+    utc, local = utc_and_local(t.started_at)
+    return HistoryRow(t.id, local[:10], utc, local, t.set_current_a, t.cutoff_v, t.ah_host,
+                      t.ah_device_final, t.wh_host, t.runtime_s, t.start_v, t.end_v, pct, t.end_reason)
 
 
 @traced
@@ -101,9 +114,10 @@ def _fmt(value, spec: str) -> str:
 
 
 def _cells(r: HistoryRow) -> list[str]:
-    return [str(r.test_id), r.date, "%.2f" % r.set_current_a, "%.2f" % r.cutoff_v, _fmt(r.ah_host, "%.3f"),
-            _fmt(r.pct_of_rated, "%.1f"), _fmt(r.ah_device, "%.3f"), _fmt(r.wh_host, "%.1f"), hms(r.runtime_s),
-            _fmt(r.start_v, "%.2f"), _fmt(r.end_v, "%.2f"), r.end_reason]
+    return [str(r.test_id), r.started_utc, r.started_local, "%.2f" % r.set_current_a, "%.2f" % r.cutoff_v,
+            _fmt(r.ah_host, "%.3f"), _fmt(r.pct_of_rated, "%.1f"), _fmt(r.ah_device, "%.3f"),
+            _fmt(r.wh_host, "%.1f"), hms(r.runtime_s), _fmt(r.start_v, "%.2f"), _fmt(r.end_v, "%.2f"),
+            r.end_reason]
 
 
 def format_table(rows: Sequence[HistoryRow]) -> str:
@@ -220,10 +234,15 @@ def _svg(label: str, parts: Sequence[str]) -> str:
             % (WIDTH, HEIGHT, _esc(label), "\n".join(parts)))
 
 
+def _started(r: HistoryRow) -> str:
+    """Both forms of the start time in one phrase: 2026-09-30 21:42 CDT (2026-10-01 02:42Z)."""
+    return "%s (%s)" % (r.started_local, r.started_utc)
+
+
 def _test_title(r: HistoryRow) -> str:
     pct = "" if r.pct_of_rated is None else " (%.1f%% of rated)" % r.pct_of_rated
     return ("%s, test %d: %s Ah%s in %s, %s V to %s V, %s"
-            % (r.date, r.test_id, _fmt(r.ah_host, "%.3f"), pct, hms(r.runtime_s), _fmt(r.start_v, "%.2f"),
+            % (_started(r), r.test_id, _fmt(r.ah_host, "%.3f"), pct, hms(r.runtime_s), _fmt(r.start_v, "%.2f"),
                _fmt(r.end_v, "%.2f"), r.end_reason))
 
 
@@ -320,7 +339,16 @@ def _capacity_chart(pack: Pack, rows: Sequence[HistoryRow]) -> str:
                      '<circle class="dot" cx="%.1f" cy="%.1f" r="4"/></g>' % (_esc(_test_title(r)), x, y, x, y))
     last = rows[-1]
     value = "%.2f Ah" % last.ah_host + ("" if last.pct_of_rated is None else " (%.0f%%)" % last.pct_of_rated)
-    parts.append('<text class="val" x="%.1f" y="%.1f" dy="0.35em">%s</text>' % (xs[-1] + 10, ys[-1], value))
+    # The value sits level with the last point, its start time in both forms on two lines under
+    # it; near the bottom of the plot the two lines go above it instead, clear of the date ticks.
+    lines = [("", value), ("lbl", last.started_local), ("lbl", last.started_utc)]
+    top = ys[-1]
+    if ys[-1] + 2 * VAL_LINE > Y1:
+        lines, top = lines[1:] + lines[:1], ys[-1] - 2 * VAL_LINE
+    spans = "".join('<tspan%s x="%.1f" y="%.1f" dy="0.35em">%s</tspan>'
+                    % (' class="%s"' % cls if cls else "", xs[-1] + 10, top + i * VAL_LINE, _esc(text))
+                    for i, (cls, text) in enumerate(lines))
+    parts.append('<text class="val">%s</text>' % spans)
     return _svg("Delivered Ah by date for %s" % pack.name, parts)
 
 
@@ -386,7 +414,7 @@ def _summary(pack: Pack, rows: Sequence[HistoryRow]) -> str:
         return "; ".join(parts + ["no finished tests yet: bin/ebc.sh discharge --pack %s adds one" % pack.name])
     parts.append("%d finished %s" % (len(rows), "test" if len(rows) == 1 else "tests"))
     last = rows[-1]
-    latest = "latest %s: %s Ah" % (last.date, _fmt(last.ah_host, "%.3f"))
+    latest = "latest %s: %s Ah" % (_started(last), _fmt(last.ah_host, "%.3f"))
     if last.pct_of_rated is not None:
         latest += ", %.1f%% of rated" % last.pct_of_rated
     return "; ".join(parts + [latest])

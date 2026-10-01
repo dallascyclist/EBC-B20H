@@ -11,12 +11,13 @@ from unittest import mock
 
 from ebctool import protocol as P
 from ebctool import run as R
-from ebctool.console import ConsoleSink, hms
+from ebctool import console as C
+from ebctool.console import ConsoleSink, hms, utc_and_local
 from ebctool.device import DeviceError
 from ebctool.session import DischargePlan, Sample, SessionResult
 from ebctool.store import SampleRow, Store
 from tests.fakes import ClosingPipe, FakeClock, FakeDevice, make_device_factory
-from tests.support import close_log, hexframe, make_log
+from tests.support import close_log, hexframe, make_log, use_tz
 
 EBC_PY = Path(__file__).resolve().parent.parent / "python" / "scripts" / "ebc.py"
 
@@ -100,11 +101,11 @@ class RulingTests(unittest.TestCase):
     def log_text(self):
         return "".join(p.read_text() for p in sorted(self.logs.glob("*.log")))
 
-    def seed_test(self, samples=2):
+    def seed_test(self, samples=2, started="2026-09-30T20:00:00Z"):
         """One finished test with `samples` samples on pack rad52, written straight to the store."""
         with Store(self.db) as st:
             p = st.add_pack("rad52", "li-ion", cells_series=14, rated_ah=17.5)
-            tid = st.begin_test(p.id, "2026-09-30T20:00:00Z", 5.0, 42.0, 600, "202609302000")
+            tid = st.begin_test(p.id, started, 5.0, 42.0, 600, "202609302000")
             for k in range(1, samples + 1):
                 st.append_sample(tid, SampleRow(tid, 2.0 * k, 54.3, 5.0, 0.003 * k, 0.15 * k, 0.003 * k, "active"))
             st.finish_test(tid, "2026-09-30T21:02:03Z", "cutoff", 3723.0, 5.123, 250.0, 5.1, 54.3, 42.0,
@@ -282,6 +283,7 @@ class RulingTests(unittest.TestCase):
     # listings
 
     def test_tests_prints_header_then_one_line_per_test(self):
+        use_tz(self, "America/Chicago")
         _, out, _ = self.main("tests")
         self.assertEqual(out.count("\n"), 1)
         self.seed_test()
@@ -289,10 +291,35 @@ class RulingTests(unittest.TestCase):
         self.assertEqual(code, 0)
         lines = out.splitlines()
         self.assertEqual(len(lines), 2)
-        for text in ("rad52", "cutoff", "1:02:03", "5.123", "2026-09-30T20:00:00Z"):
+        for text in ("rad52", "cutoff", "1:02:03", "5.123", "2026-09-30 20:00Z", "2026-09-30 15:00 CDT"):
             self.assertIn(text, lines[1])
         code, out, _ = self.main("tests", "--pack", "rad52")
         self.assertEqual((code, len(out.splitlines())), (0, 2))
+
+    # R37: start times in UTC and in the environment's local zone
+
+    def started_cells(self, header, row):
+        """The started UTC and started local cells of a listing row, cut at their header's place."""
+        utc, local = header.index("started UTC"), header.index("started local")
+        return row[utc:local].strip(), row[local:].split("  ")[0].strip()
+
+    def test_listings_show_start_in_utc_and_local_time(self):
+        use_tz(self, "America/Chicago")
+        self.seed_test(started="2026-10-01T02:42:14Z")
+        for args in (("tests",), ("pack", "show", "rad52")):
+            with self.subTest(args=args):
+                code, out, _ = self.main(*args)
+                self.assertEqual(code, 0)
+                header, row = out.splitlines()[-2:]
+                self.assertNotIn("2026-10-01T02:42:14Z", out)
+                self.assertEqual(self.started_cells(header, row), ("2026-10-01 02:42Z", "2026-09-30 21:42 CDT"))
+
+    def test_listings_under_tz_utc_show_the_same_time_twice(self):
+        use_tz(self, "UTC")
+        self.seed_test(started="2026-10-01T02:42:14Z")
+        code, out, _ = self.main("tests")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.started_cells(*out.splitlines()), ("2026-10-01 02:42Z", "2026-10-01 02:42 UTC"))
 
     def test_pack_show_lists_its_tests(self):
         self.seed_test()
@@ -822,7 +849,8 @@ class DeviceCommandRulingTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         header, row = out.splitlines()
         self.assertIn("Ah device", header)
-        self.assertEqual(row.split()[6], "-")   # columns: id date current cutoff Ah %rated Ah-device ...
+        start = header.index("Ah device")
+        self.assertEqual(row[start:start + len("Ah device")].strip(), "-")
         html = Path(self.tmp.name) / "out" / "p.html"
         code, out = self._plain("history", "--pack", "p", "--html", str(html))
         self.assertEqual(code, 0, out)
@@ -956,6 +984,29 @@ class ConsoleSinkTests(unittest.TestCase):
         sink.on_sample(Sample(2.0, 54.21, 1.0, 0.001, 0.05, 0.0, "active"))
         sink.on_end(SessionResult("cutoff", 2.0, 0.001, 0.05, 0.0, 54.58, 50.0, "EBC-B20H", None, 3, 0))
         self.assertEqual(Gone.calls, 1)
+
+    # R37: one helper turns a stored UTC time into the UTC and local forms every listing shows
+
+    def test_utc_and_local_in_chicago(self):
+        use_tz(self, "America/Chicago")
+        utc, local = utc_and_local("2026-10-01T02:42:14Z")
+        self.assertEqual((utc, local), ("2026-10-01 02:42Z", "2026-09-30 21:42 CDT"))
+        self.assertEqual(local[:10], "2026-09-30")   # the local calendar day
+        self.assertEqual(utc_and_local("2026-12-01T02:42:14Z"), ("2026-12-01 02:42Z", "2026-11-30 20:42 CST"))
+
+    def test_utc_and_local_under_tz_utc_differ_only_in_the_zone_label(self):
+        use_tz(self, "UTC")
+        utc, local = utc_and_local("2026-10-01T02:42:14Z")
+        self.assertEqual((utc, local), ("2026-10-01 02:42Z", "2026-10-01 02:42 UTC"))
+        self.assertEqual(utc[:-1], local[:-len(" UTC")])
+
+    def test_local_zone_without_abbreviation_shows_numeric_offset(self):
+        from datetime import datetime, timedelta, timezone
+        nameless = timezone(timedelta(hours=5, minutes=30), "")
+        self.assertEqual(C._local_text(datetime(2026, 10, 1, 8, 12, 14, tzinfo=nameless)), "2026-10-01 08:12 +0530")
+
+    def test_unparseable_stored_time_is_shown_as_is(self):
+        self.assertEqual(utc_and_local("not a time"), ("not a time", "not a time"))
 
     def test_hms_is_one_format_with_unpadded_hours(self):
         cases = [(0, "0:00:00"), (154, "0:02:34"), (154.4, "0:02:34"), (3599.6, "1:00:00"), (3723, "1:02:03"),
