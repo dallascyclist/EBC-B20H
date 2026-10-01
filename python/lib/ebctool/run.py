@@ -357,20 +357,37 @@ def cmd_discover(args, config: Config, ctx: RunContext) -> int:
 
 
 def cmd_monitor(args, config: Config, ctx: RunContext) -> int:
+    """Print frames until Ctrl-C (exit 2); exit 3 if no frame at all arrives within
+    silence_timeout_s of Connect. Once a frame has arrived, silence never ends it."""
+    timeout = config.serial.silence_timeout_s
     device = ctx.device_factory(config, args.port)
+    answered = True
     try:
         try:
             ctx.log.decision("run.monitor", "sending Connect; printing frames until Ctrl-C")
             device.send(P.connect())
             t0 = ctx.clock.now()
+            frames = 0
             while True:
-                status = device.read(READ_STEP_S)
+                step = READ_STEP_S
+                if frames == 0:
+                    remaining = t0 + timeout - ctx.clock.now()
+                    if remaining <= 0:
+                        ctx.log.decision("run.monitor", "no frame within %.1f s of Connect; no_answer" % timeout)
+                        answered = False
+                        break
+                    step = min(step, remaining)
+                status = device.read(step)
                 if status is not None:
+                    frames += 1
                     print(status_line(status, ctx.clock.now() - t0), file=ctx.stdout, flush=True)
         except KeyboardInterrupt:
             ctx.log.decision("run.monitor", "Ctrl-C; stopping")
     finally:
         _disconnect_and_close(device, ctx.log)
+    if not answered:
+        ctx.log.info("run.monitor", "error: %s" % NO_ANSWER)
+        return _error(ctx.stdout, NO_ANSWER)
     print("\nstopped by Ctrl-C; tester disconnected", file=ctx.stdout)
     return EXIT_USER_STOP
 

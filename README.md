@@ -141,7 +141,8 @@ The limits default to the B20H's published ranges: current up to 20.00 A with a 
 
 The table is written for `discharge`; the other commands use the same codes. `pack`, `tests`,
 `export` and `history` exit 0 or 3 (1 on an unexpected failure). `discover` exits 1 if the tester
-sent nothing. `monitor` runs until Ctrl-C, so it exits 2. `ports` exits 0. Errors are
+sent nothing. `monitor` runs until Ctrl-C, so it exits 2, or 3 with `error: no answer from tester`
+if nothing arrives within `silence_timeout_s` of Connect. `ports` exits 0. Errors are
 printed as `error: ...` on stdout; stderr carries only the run log's warnings and errors (and the
 Python version check, which runs first).
 

@@ -432,6 +432,16 @@ class CtrlCWhenDrained(FakeDevice):
         return super().read(timeout)
 
 
+class CtrlCAfterAMinute(FakeDevice):
+    """Ctrl-C once a minute has passed on the fake clock, so a command that waits silently forever
+    ends (as exit 2) instead of hanging the test."""
+
+    def read(self, timeout):
+        if self.clock.now() >= 60.0:
+            raise KeyboardInterrupt
+        return super().read(timeout)
+
+
 class CtrlCOnFirstRead(FakeDevice):
     def read(self, timeout):
         raise KeyboardInterrupt
@@ -525,6 +535,32 @@ class DeviceCommandRulingTests(unittest.TestCase):
         self.assertIn("4.5 s", out)
         self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
         self.assertTrue(dev.closed)
+
+    # R32: monitor gives up when nothing at all answers Connect
+
+    def test_monitor_no_frame_within_silence_timeout_exits_3(self):
+        code, out, dev = self.main([], "monitor", device_class=CtrlCAfterAMinute)
+        self.assertEqual(code, 3)
+        self.assertEqual(out, "error: %s\n" % NO_ANSWER)
+        self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
+        self.assertTrue(dev.closed)
+        self.assertEqual(dev.clock.now(), 10.0)   # the default [serial] silence_timeout_s, on the fake clock
+
+    def test_monitor_no_answer_follows_configured_silence_timeout(self):
+        self.cfg.write_text(self.cfg.read_text().replace("port = /dev/fake\n", "port = /dev/fake\nsilence_timeout_s = 3\n"))
+        code, out, dev = self.main([(5.0, IDLE_HEX)], "monitor", device_class=CtrlCAfterAMinute)
+        self.assertEqual(code, 3)
+        self.assertEqual(out, "error: %s\n" % NO_ANSWER)
+        self.assertEqual(dev.clock.now(), 3.0)
+        self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
+
+    def test_monitor_keeps_running_through_silence_once_frames_arrived(self):
+        script = [(0.5, IDLE_HEX), (30.0, IDLE_HEX)]   # 29.5 s gap, well past silence_timeout_s
+        code, out, dev = self.main(script, "monitor", device_class=CtrlCWhenDrained)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.count("54.58"), 2)
+        self.assertIn("30.0 s", out)
+        self.assertEqual(dev.sent, [P.connect(), P.disconnect()])
 
     def test_ports_lists_ports_and_the_chosen_one(self):
         with mock.patch.object(R, "list_ports", return_value=[("/dev/cu.a", "USB Serial"), ("/dev/cu.b", "other")]):
