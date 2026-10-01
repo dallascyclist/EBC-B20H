@@ -140,7 +140,41 @@ class ReportTests(unittest.TestCase):
 
     def test_summary_names_the_latest_test_in_both_forms(self):
         self.late_evening("2026-10-01T02:42:14Z")
-        self.assertIn("latest 2026-09-30 21:42 CDT (2026-10-01 02:42Z): 8.000 Ah", self.html("eve"))
+        self.assertIn("latest capacity result 2026-09-30 21:42 CDT (2026-10-01 02:42Z): 8.000 Ah", self.html("eve"))
+
+    # R41: the summary line never presents a pack_lost test as the latest capacity result
+
+    def summary(self, pack):
+        [text] = re.findall(r'<p class="summary">(.*?)</p>', self.html(pack))
+        return text
+
+    def test_summary_without_pack_lost_tests(self):
+        self.assertEqual(self.summary("rad52"),
+                         "rated 10.00 Ah; 3 finished tests; latest capacity result 2026-09-30 05:00 CDT"
+                         " (2026-09-30 10:00Z): 8.000 Ah, 80.0% of rated")
+
+    def test_summary_counts_an_older_pack_lost_test(self):
+        self.lost_pack()   # cutoff, pack_lost, cutoff
+        self.assertEqual(self.summary("lost"),
+                         "rated 10.00 Ah; 3 finished tests (1 pack_lost); latest capacity result 2026-09-20"
+                         " 05:00 CDT (2026-09-20 10:00Z): 8.800 Ah, 88.0% of rated")
+
+    def test_summary_skips_a_newest_pack_lost_test(self):
+        p = self.store.add_pack("bench", "li-ion", rated_ah=17.5)
+        add_finished(self.store, p.id, "15", 8.75)
+        lost = add_finished(self.store, p.id, "30", 0.007, reason="pack_lost")   # the 22:06 CDT bench unplug
+        self.assertEqual(self.summary("bench"),
+                         "rated 17.50 Ah; 2 finished tests (1 pack_lost); latest capacity result 2026-09-15"
+                         " 05:00 CDT (2026-09-15 10:00Z): 8.750 Ah, 50.0%% of rated;"
+                         " newest test %d ended pack_lost: not a capacity result" % lost)
+
+    def test_summary_with_only_pack_lost_tests_has_no_capacity_result(self):
+        p = self.store.add_pack("gone", "li-ion", rated_ah=10.0)
+        add_finished(self.store, p.id, "10", 0.5, reason="pack_lost")
+        lost = add_finished(self.store, p.id, "12", 0.2, reason="pack_lost")
+        self.assertEqual(self.summary("gone"),
+                         "rated 10.00 Ah; 2 finished tests (2 pack_lost); no capacity result yet;"
+                         " newest test %d ended pack_lost: not a capacity result" % lost)
 
     def test_html_is_self_contained_with_one_polyline_per_test(self):
         out = Path(self.tmp.name) / "h.html"
@@ -255,6 +289,35 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(len(SVG_RE.findall(html)), 1)   # chart A only
         self.assertIn('<p class="empty">no capacity to plot</p>\n<p class="chart-note">pack_lost tests are not'
                       ' plotted here</p>', html)
+
+    # R41: a running sample under the pack-lost floor (1.00 V) does not stretch chart A's shared axis
+
+    def chart_a(self, pack):
+        """Chart A's volt tick values and its polylines as {test id: [(x, y), ...]}."""
+        chart = SVG_RE.findall(self.html(pack))[0]
+        ticks = [float(b) for a, b in TEXT_RE.findall(chart)
+                 if 'class="tick"' in a and 'text-anchor="end"' in a and b != "V"]
+        lines = {}
+        for points, title in re.findall(r'<polyline class="line[^"]*" points="([^"]+)"><title>([^<]*)</title>', chart):
+            tid = int(re.search(r"test (\d+):", title).group(1))
+            lines[tid] = [tuple(map(float, p.split(","))) for p in points.split()]
+        return ticks, lines
+
+    def test_chart_a_axis_ignores_samples_below_the_pack_lost_floor(self):
+        first, lost, last = self.lost_pack()   # every curve runs 54 -> 52 V
+        ticks_before, lines_before = self.chart_a("lost")
+        self.store.append_sample(lost, SampleRow(lost, 6.0, 0.99, 0.0, 0.25, 50.0, 0.25, "active"))
+        self.store.append_sample(lost, SampleRow(lost, 8.0, 0.00, 0.0, 0.25, 50.0, 0.25, "active"))   # pack gone
+        ticks, lines = self.chart_a("lost")
+        self.assertEqual(ticks, ticks_before)
+        self.assertEqual(ticks[0], 52.0)
+        self.assertEqual(len(lines[lost]), 3)                      # the two collapsed samples are not drawn
+        self.assertEqual([y for _, y in lines[lost]], [y for _, y in lines_before[lost]])
+        self.assertTrue(all(24 <= y <= 320 for pts in lines.values() for _, y in pts))
+        self.assertEqual([s.volts for s in self.store.samples(lost)][-2:], [0.99, 0.00])   # still stored
+        csv_path = Path(self.tmp.name) / "lost.csv"
+        self.assertEqual(self.store.export_csv(lost, csv_path), 5)                        # and exported
+        self.assertTrue(csv_path.read_text().splitlines()[-1].startswith("8.0,0.0,"))
 
     def test_html_table_marks_pack_lost_in_the_end_column(self):
         first, lost, last = self.lost_pack()

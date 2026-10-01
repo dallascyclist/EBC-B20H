@@ -24,6 +24,16 @@ from tests.test_session import COLLAPSED_0V, bench_unplug_script
 EBC_PY = Path(__file__).resolve().parent.parent / "python" / "scripts" / "ebc.py"
 
 
+class HeadPipe(ClosingPipe):
+    """A stdout into `head -n 1`: the reader takes the first line and goes. A block-buffered stdout
+    then fails on the write that fills its buffer; here every write after the closing one fails."""
+
+    def write(self, text):
+        if self.closing:
+            self._fail()
+        return super().write(text)
+
+
 class RunTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -209,6 +219,41 @@ class RulingTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out.failures, 1)
         self.assertIn("disk on fire", self.log_text())
+
+    # R41: listings print best effort too, so `bin/ebc.sh pack list | head -n 1` exits 0
+
+    def test_listings_survive_closed_stdout(self):
+        self.seed_test()
+        html = self.root / "out" / "h.html"
+        cases = (["pack", "list"], ["pack", "show", "rad52"], ["tests"], ["tests", "--pack", "rad52"],
+                 ["history", "--pack", "rad52"], ["history", "--pack", "rad52", "--html", str(html)])
+        for args in cases:
+            with self.subTest(args=args):
+                out, err = self.closed_stdout(), io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = R.main(["--config", str(self.cfg), *args], stdout=out, stdin=io.StringIO(""))
+                self.assertEqual(code, 0)
+                self.assertGreaterEqual(out.failures, 1)
+                self.assertEqual(err.getvalue(), "")
+        self.assertIn("rad52 discharge history", html.read_text(encoding="utf-8"))   # still written
+        self.assertNotIn("Traceback", self.log_text())
+        self.assertIn("not printed (BrokenPipeError", self.log_text())
+
+    def test_listing_into_head_n_1_exits_0(self):
+        self.seed_test()
+        html = self.root / "h.html"
+        # pack list writes line by line, so only its header gets through; history writes its table
+        # (header and one row) in one write, and then "wrote PATH" fails
+        for args, lines in ((["pack", "list"], 1), (["history", "--pack", "rad52", "--html", str(html)], 2)):
+            with self.subTest(args=args):
+                out, err = HeadPipe(after_text="\n"), io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = R.main(["--config", str(self.cfg), *args], stdout=out, stdin=io.StringIO(""))
+                self.assertEqual(code, 0)
+                self.assertEqual(len(out.getvalue().splitlines()), lines)
+                self.assertGreaterEqual(out.failures, 1)
+                self.assertEqual(err.getvalue(), "")
+        self.assertTrue(html.is_file())
 
     # R9
 
@@ -1137,6 +1182,21 @@ class EntryScriptTests(unittest.TestCase):
         proc = self.run_with_closed_stdout()   # no command: error on stdout, exit 3
         self.assertEqual(proc.returncode, 3)
         self.assertEqual(proc.stderr, b"")
+
+    def test_other_os_error_at_the_final_flush_keeps_the_exit_code(self):
+        # R41: stdout open read-only, so the final flush fails with EBADF: an OSError, not BrokenPipeError
+        for args, want in ((["--version"], 0), ([], 3)):
+            with self.subTest(args=args), tempfile.TemporaryDirectory() as cwd:
+                path = Path(cwd) / "stdout"
+                path.write_bytes(b"")
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    proc = subprocess.run([sys.executable, str(EBC_PY), *args], stdout=fd, stderr=subprocess.PIPE,
+                                          stdin=subprocess.DEVNULL, cwd=cwd, timeout=60)
+                finally:
+                    os.close(fd)
+                self.assertEqual(proc.returncode, want)
+                self.assertEqual(proc.stderr, b"")
 
 
 if __name__ == "__main__":

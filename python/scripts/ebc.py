@@ -19,11 +19,12 @@ if __name__ == "__main__":
     finally:
         # Console output is best effort (R38). When stdout's reader has gone (a `| tee` killed by
         # the same Ctrl-C, `| head`), the last flush fails; send what is left to /dev/null so the
-        # interpreter does not report it at exit or replace the exit code with 120.
+        # interpreter does not report it at exit or replace the exit code with 120. Any OSError
+        # here (EBADF, ENOSPC, ...) is handled the same way, keeping main's exit code (R41).
         try:
             if sys.stdout is not None:
                 sys.stdout.flush()
-        except BrokenPipeError:
+        except OSError:
             devnull = os.open(os.devnull, os.O_WRONLY)
             os.dup2(devnull, sys.stdout.fileno())
     sys.exit(code)

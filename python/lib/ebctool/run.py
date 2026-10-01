@@ -214,8 +214,9 @@ def _table(columns: Sequence[tuple[str, str]], rows: Sequence[Sequence[str]]) ->
 
 
 def _print(ctx: RunContext, lines: Sequence[str]) -> None:
+    """Listings are best effort too (R41): `pack list | head -n 1` still exits 0."""
     for line in lines:
-        print(line, file=ctx.stdout)
+        _say(ctx.stdout, line)
 
 
 PACK_COLUMNS = (("name", "<"), ("chemistry", "<"), ("cells", ">"), ("nominal V", ">"), ("rated Ah", ">"),
@@ -524,11 +525,11 @@ def cmd_history(args, config: Config, ctx: RunContext) -> int:
     """The pack's finished tests as a table; with --html also the HTML page (its directory created)."""
     with closing(_open_store(config, ctx.store_factory)) as store:
         rows = history_rows(store, args.pack)
-        print(format_table(rows), file=ctx.stdout)
+        _say(ctx.stdout, format_table(rows))   # best effort: a closed stdout still writes the page (R41)
         if args.html:
             path = Path(args.html)
             write_html(store, args.pack, path)
-            print("wrote %s" % path, file=ctx.stdout)
+            _say(ctx.stdout, "wrote %s" % path)
     return EXIT_OK
 
 

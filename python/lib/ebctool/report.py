@@ -17,6 +17,8 @@ chart B's value label carry both forms (R37).
 A pack_lost test (pack unplugged, or its BMS cut off) is a finished test and is listed like any
 other, but it is not a capacity result: the HTML table marks it in the end column and chart B
 leaves it out, saying so below the chart, so a BMS trip does not look like capacity fade (R39).
+The summary line takes its latest capacity result from the newest test that is not pack_lost, and
+chart A draws no sample under the pack-lost floor, which would stretch its voltage axis to 0 (R41).
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ from typing import Optional, Sequence
 
 from ebctool.console import hms, utc_and_local
 from ebctool.log import current, traced
+from ebctool.session import PACK_LOST_FLOOR_CV
 from ebctool.store import Pack, SampleRow, Store, TestRow
 
 RECENT = 8                       # newest tests drawn in categorical colour; older ones fold into gray
@@ -258,7 +261,11 @@ def _test_title(r: HistoryRow) -> str:
 
 def _voltage_chart(pack: Pack, rows: Sequence[HistoryRow], curves: dict) -> str:
     """Legend, then the SVG: older tests in gridline gray underneath, the newest RECENT in slot
-    colours by date, each coloured curve with a dated end label in a column right of the plot."""
+    colours by date, each coloured curve with a dated end label in a column right of the plot.
+    Samples under the pack-lost floor (a pack_lost run's last frame, 0.00 V) are not drawn: they
+    would stretch the shared voltage axis to 0. The database and CSV keep them."""
+    curves = {r.test_id: [s for s in curves[r.test_id] if round(s.volts * 100) >= PACK_LOST_FLOOR_CV]
+              for r in rows}   # compared in centivolts, as the session judges it
     samples = [s for r in rows for s in curves[r.test_id]]
     if not samples:
         return '<p class="empty">no samples to plot</p>'
@@ -419,15 +426,26 @@ def _css() -> str:
 
 
 def _summary(pack: Pack, rows: Sequence[HistoryRow]) -> str:
+    """Rated Ah; finished tests, with how many were pack_lost; the latest capacity result, from the
+    newest test that is not pack_lost; and a pointer to the newest test when it was pack_lost (R41)."""
     parts = ["rated %.2f Ah" % pack.rated_ah if pack.rated_ah is not None else "rated Ah not set"]
     if not rows:
         return "; ".join(parts + ["no finished tests yet: bin/ebc.sh discharge --pack %s adds one" % pack.name])
-    parts.append("%d finished %s" % (len(rows), "test" if len(rows) == 1 else "tests"))
-    last = rows[-1]
-    latest = "latest %s: %s Ah" % (_started(last), _fmt(last.ah_host, "%.3f"))
-    if last.pct_of_rated is not None:
-        latest += ", %.1f%% of rated" % last.pct_of_rated
-    return "; ".join(parts + [latest])
+    lost = sum(r.end_reason == PACK_LOST for r in rows)
+    parts.append("%d finished %s" % (len(rows), "test" if len(rows) == 1 else "tests")
+                 + (" (%d %s)" % (lost, PACK_LOST) if lost else ""))
+    results = [r for r in rows if r.end_reason != PACK_LOST]
+    if results:
+        last = results[-1]
+        latest = "latest capacity result %s: %s Ah" % (_started(last), _fmt(last.ah_host, "%.3f"))
+        if last.pct_of_rated is not None:
+            latest += ", %.1f%% of rated" % last.pct_of_rated
+        parts.append(latest)
+    else:
+        parts.append("no capacity result yet")
+    if rows[-1].end_reason == PACK_LOST:
+        parts.append("newest test %d ended %s" % (rows[-1].test_id, LOST_END_TEXT))
+    return "; ".join(parts)
 
 
 def _html_table(pack: Pack, rows: Sequence[HistoryRow]) -> str:
